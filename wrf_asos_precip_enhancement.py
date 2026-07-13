@@ -101,10 +101,11 @@ SAVE_FIGURES = True
 CASES = [
     {
         "case_name": "case_20250916",
-        # NOSEED/SEED 파일이 같은 디렉터리에 있어도 glob으로 구분한다.
-        # 예: wrfout_250916_21utc_NOSEED.nc, wrfout_250916_21utc_SEED.nc
-        "noseed_dir": "/path/to/case_20250916",
-        "seed_dir": "/path/to/case_20250916",
+        # wrfout 파일 경로를 직접 지정한다.
+        # 여러 파일이 있는 디렉터리를 지정하려면 noseed_path/seed_path에 디렉터리를 넣고
+        # noseed_glob/seed_glob으로 파일 패턴을 지정한다.
+        "noseed_path": "/path/to/case_20250916/wrfout_250916_21utc_NOSEED.nc",
+        "seed_path": "/path/to/case_20250916/wrfout_250916_21utc_SEED.nc",
         "noseed_glob": "wrfout_*_NOSEED.nc",
         "seed_glob": "wrfout_*_SEED.nc",
         "wrf_time_basis": "UTC",  # "UTC" 또는 "KST"
@@ -168,8 +169,6 @@ def ensure_directory(path: Path) -> None:
 def validate_case(case: dict) -> None:
     required = {
         "case_name",
-        "noseed_dir",
-        "seed_dir",
         "wrf_time_basis",
         "seeding_start_kst",
         "seeding_end_kst",
@@ -179,6 +178,10 @@ def validate_case(case: dict) -> None:
     missing = required.difference(case)
     if missing:
         raise KeyError(f"사례 설정 누락: {sorted(missing)}")
+    if "noseed_path" not in case and "noseed_dir" not in case:
+        raise KeyError("사례 설정 누락: 'noseed_path' 또는 'noseed_dir'가 필요합니다.")
+    if "seed_path" not in case and "seed_dir" not in case:
+        raise KeyError("사례 설정 누락: 'seed_path' 또는 'seed_dir'가 필요합니다.")
 
     seed_start = parse_datetime(case["seeding_start_kst"])
     seed_end = parse_datetime(case["seeding_end_kst"])
@@ -253,22 +256,31 @@ def decode_wrf_times(ds: xr.Dataset) -> List[datetime]:
     raise KeyError("WRF 파일에 Times 또는 datetime형 Time 좌표가 없습니다.")
 
 
+def collect_wrf_files(source_path: Path, file_pattern: str = WRF_GLOB) -> List[Path]:
+    """wrfout 파일 경로 또는 디렉터리에서 읽을 WRF 파일 목록을 반환한다."""
+    if not source_path.exists():
+        raise FileNotFoundError(f"WRF 경로가 없습니다: {source_path}")
+
+    if source_path.is_file():
+        return [source_path]
+
+    files = sorted(p for p in source_path.glob(file_pattern) if p.is_file())
+    if not files:
+        raise FileNotFoundError(f"WRF 파일을 찾지 못했습니다: {source_path}/{file_pattern}")
+    return files
+
+
 def build_wrf_time_index(
-    directory: Path,
+    source_path: Path,
     time_basis: str,
     file_pattern: str = WRF_GLOB,
 ) -> Dict[datetime, WRFTimeRecord]:
-    """디렉터리 전체에서 file_pattern과 일치하는 wrfout의 모든 Time을 KST 기준 색인한다."""
+    """wrfout 파일 경로 또는 디렉터리의 모든 Time을 KST 기준 색인한다."""
     if DUPLICATE_WRF_TIME_POLICY not in {"error", "last", "first"}:
         raise ValueError(
             'DUPLICATE_WRF_TIME_POLICY는 "error", "last", "first" 중 하나여야 합니다.'
         )
-    if not directory.exists():
-        raise FileNotFoundError(f"WRF 디렉터리가 없습니다: {directory}")
-
-    files = sorted(p for p in directory.glob(file_pattern) if p.is_file())
-    if not files:
-        raise FileNotFoundError(f"WRF 파일을 찾지 못했습니다: {directory}/{file_pattern}")
+    files = collect_wrf_files(source_path, file_pattern)
 
     index: Dict[datetime, WRFTimeRecord] = {}
 
@@ -829,8 +841,8 @@ def process_case(case: dict, asos_df: pd.DataFrame) -> dict:
     effect_start = parse_datetime(case["effect_start_kst"])
     effect_end = parse_datetime(case["effect_end_kst"])
 
-    noseed_dir = Path(case["noseed_dir"])
-    seed_dir = Path(case["seed_dir"])
+    noseed_path = Path(case.get("noseed_path", case.get("noseed_dir")))
+    seed_path = Path(case.get("seed_path", case.get("seed_dir")))
     noseed_glob = case.get("noseed_glob", NOSEED_WRF_GLOB)
     seed_glob = case.get("seed_glob", SEED_WRF_GLOB)
     time_basis = case["wrf_time_basis"]
@@ -842,8 +854,8 @@ def process_case(case: dict, asos_df: pd.DataFrame) -> dict:
     print(f"Effect  KST : {effect_start} ~ {effect_end}")
 
     print("[1/8] WRF 시간 색인 생성")
-    noseed_index = build_wrf_time_index(noseed_dir, time_basis, noseed_glob)
-    seed_index = build_wrf_time_index(seed_dir, time_basis, seed_glob)
+    noseed_index = build_wrf_time_index(noseed_path, time_basis, noseed_glob)
+    seed_index = build_wrf_time_index(seed_path, time_basis, seed_glob)
 
     noseed_records = get_records_in_period(
         noseed_index, effect_start, effect_end, WRF_TIME_TOLERANCE_MINUTES, "NOSEED"
