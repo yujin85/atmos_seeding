@@ -68,7 +68,10 @@ SUBDOMAIN_NY = 100
 SUBDOMAIN_NX = 100
 
 # WRF 파일 검색 패턴
-WRF_GLOB = "wrfout_d0*"
+# 예: wrfout_250916_21utc_NOSEED.nc, wrfout_250916_21utc_SEED.nc
+WRF_GLOB = "wrfout_*.nc"
+NOSEED_WRF_GLOB = "wrfout_*_NOSEED.nc"
+SEED_WRF_GLOB = "wrfout_*_SEED.nc"
 
 # 효과시간 경계에 정확한 wrfout 시각이 없을 때 허용할 최근접 시각 오차
 # 정확 일치만 허용하려면 0으로 설정
@@ -98,8 +101,12 @@ SAVE_FIGURES = True
 CASES = [
     {
         "case_name": "case_20250916",
-        "noseed_dir": "/path/to/case_20250916/NOSEED",
-        "seed_dir": "/path/to/case_20250916/SEED",
+        # NOSEED/SEED 파일이 같은 디렉터리에 있어도 glob으로 구분한다.
+        # 예: wrfout_250916_21utc_NOSEED.nc, wrfout_250916_21utc_SEED.nc
+        "noseed_dir": "/path/to/case_20250916",
+        "seed_dir": "/path/to/case_20250916",
+        "noseed_glob": "wrfout_*_NOSEED.nc",
+        "seed_glob": "wrfout_*_SEED.nc",
         "wrf_time_basis": "UTC",  # "UTC" 또는 "KST"
 
         # 실제 시딩 수행시간: 기록·출력용
@@ -246,8 +253,12 @@ def decode_wrf_times(ds: xr.Dataset) -> List[datetime]:
     raise KeyError("WRF 파일에 Times 또는 datetime형 Time 좌표가 없습니다.")
 
 
-def build_wrf_time_index(directory: Path, time_basis: str) -> Dict[datetime, WRFTimeRecord]:
-    """디렉터리 전체 wrfout의 모든 Time을 KST 기준 색인한다."""
+def build_wrf_time_index(
+    directory: Path,
+    time_basis: str,
+    file_pattern: str = WRF_GLOB,
+) -> Dict[datetime, WRFTimeRecord]:
+    """디렉터리 전체에서 file_pattern과 일치하는 wrfout의 모든 Time을 KST 기준 색인한다."""
     if DUPLICATE_WRF_TIME_POLICY not in {"error", "last", "first"}:
         raise ValueError(
             'DUPLICATE_WRF_TIME_POLICY는 "error", "last", "first" 중 하나여야 합니다.'
@@ -255,9 +266,9 @@ def build_wrf_time_index(directory: Path, time_basis: str) -> Dict[datetime, WRF
     if not directory.exists():
         raise FileNotFoundError(f"WRF 디렉터리가 없습니다: {directory}")
 
-    files = sorted(p for p in directory.glob(WRF_GLOB) if p.is_file())
+    files = sorted(p for p in directory.glob(file_pattern) if p.is_file())
     if not files:
-        raise FileNotFoundError(f"WRF 파일을 찾지 못했습니다: {directory}/{WRF_GLOB}")
+        raise FileNotFoundError(f"WRF 파일을 찾지 못했습니다: {directory}/{file_pattern}")
 
     index: Dict[datetime, WRFTimeRecord] = {}
 
@@ -820,6 +831,8 @@ def process_case(case: dict, asos_df: pd.DataFrame) -> dict:
 
     noseed_dir = Path(case["noseed_dir"])
     seed_dir = Path(case["seed_dir"])
+    noseed_glob = case.get("noseed_glob", NOSEED_WRF_GLOB)
+    seed_glob = case.get("seed_glob", SEED_WRF_GLOB)
     time_basis = case["wrf_time_basis"]
 
     print("\n" + "=" * 90)
@@ -829,8 +842,8 @@ def process_case(case: dict, asos_df: pd.DataFrame) -> dict:
     print(f"Effect  KST : {effect_start} ~ {effect_end}")
 
     print("[1/8] WRF 시간 색인 생성")
-    noseed_index = build_wrf_time_index(noseed_dir, time_basis)
-    seed_index = build_wrf_time_index(seed_dir, time_basis)
+    noseed_index = build_wrf_time_index(noseed_dir, time_basis, noseed_glob)
+    seed_index = build_wrf_time_index(seed_dir, time_basis, seed_glob)
 
     noseed_records = get_records_in_period(
         noseed_index, effect_start, effect_end, WRF_TIME_TOLERANCE_MINUTES, "NOSEED"
