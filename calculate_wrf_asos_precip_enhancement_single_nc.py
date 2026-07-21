@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import csv
 import math
+import os
 import re
 import sys
 import warnings
@@ -43,6 +44,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import BoundaryNorm, ListedColormap
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -92,6 +94,35 @@ ASOS_TIME_TOLERANCE_MINUTES = 0
 ENHANCEMENT_THRESHOLD_MM = 0.01
 MIN_SEED_MEAN_FOR_RATE_MM = 1.0e-12
 SAVE_FIGURES = True
+
+# -----------------------------------------------------------------------------
+# NCL 유사 그림 설정
+# -----------------------------------------------------------------------------
+# SEED/NOSEED에는 반드시 같은 등치선 구간을 적용해 직접 비교한다.
+PRECIP_LEVELS_MM = np.array(
+    [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 100],
+    dtype=float,
+)
+PRECIP_COLORMAP = "turbo"
+
+# draw_anal_SUNNY.ncl의 누적 증우량 등치선 구간과 색상 구조를 반영한다.
+ENHANCEMENT_LEVELS_MM = np.array(
+    [-3, -2, -1, -0.1, -0.01, 0.01, 0.1, 1, 2, 3],
+    dtype=float,
+)
+ENHANCEMENT_COLORS = [
+    "mediumblue", "mediumblue", "dodgerblue", "cadetblue",
+    "lightcyan", "white", "sandybrown", "coral",
+    "brown", "darkred", "maroon",
+]
+
+# NCL에서 KOREA_MAP 환경변수로 읽던 행정경계 파일.
+# 환경변수가 없으면 경계선을 생략하고 WRF 격자만 그린다.
+KOREA_MAP_FILE = (
+    Path(os.environ["KOREA_MAP"]) if os.environ.get("KOREA_MAP") else None
+)
+MAP_LINEWIDTH = 0.8
+FIGURE_DPI = 250
 
 # 사례별 설정
 # - WRF 파일 내부 Times: UTC
@@ -761,6 +792,62 @@ def safe_nanmax(array: np.ndarray) -> float:
     return float(np.nanmax(array)) if np.isfinite(array).any() else float("nan")
 
 
+def read_korea_map_segments(path: Optional[Path]) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """
+    NCL KOREA_MAP 형식의 경계선 파일을 읽는다.
+
+    각 블록의 첫 줄은 "점개수 경계종류", 이후 점개수만큼 "경도 위도"가
+    이어지는 형식을 가정한다. NCL 코드와 동일하게 경계종류 0 또는 2만 그린다.
+    """
+    if path is None or not path.exists():
+        return []
+
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    segments: List[Tuple[np.ndarray, np.ndarray]] = []
+    i = 0
+    while i < len(lines):
+        tokens = lines[i].split()
+        if len(tokens) < 2:
+            i += 1
+            continue
+        try:
+            npoint = int(tokens[0])
+            info = int(tokens[1])
+        except ValueError:
+            i += 1
+            continue
+
+        coords = []
+        for row in lines[i + 1:i + 1 + npoint]:
+            values = row.split()
+            if len(values) < 2:
+                continue
+            try:
+                coords.append((float(values[0]), float(values[1])))
+            except ValueError:
+                continue
+
+        if info in {0, 2} and len(coords) >= 2:
+            arr = np.asarray(coords, dtype=float)
+            segments.append((arr[:, 0], arr[:, 1]))
+        i += npoint + 1
+
+    return segments
+
+
+def add_map_lines(
+    ax: plt.Axes,
+    segments: Sequence[Tuple[np.ndarray, np.ndarray]],
+) -> None:
+    """분석영역 안에 포함되는 해안선·행정경계선을 추가한다."""
+    for line_lon, line_lat in segments:
+        ax.plot(
+            line_lon, line_lat,
+            color="black", linewidth=MAP_LINEWIDTH,
+            solid_capstyle="round", zorder=5,
+        )
+
+
 def save_maps(
     output_dir: Path,
     lon: np.ndarray,
@@ -772,27 +859,101 @@ def save_maps(
     center_lat: float,
     case_name: str,
 ) -> None:
-    figures = [
-        (noseed, "NOSEED accumulated precipitation", "mm", "noseed_precip.png", None),
-        (seed, "SEED accumulated precipitation", "mm", "seed_precip.png", None),
-        (enhancement, "Precipitation enhancement (SEED - NOSEED)", "mm", "enhancement.png", "RdBu_r"),
+    """
+    NCL 그림과 유사하게 이산 등치선, 공통 강수 색상범위, 행정경계선 및
+    대관령 표식을 적용하여 SEED/NOSEED/증우량 지도를 저장한다.
+    """
+    map_segments = read_korea_map_segments(KOREA_MAP_FILE)
+
+    precip_cmap = plt.get_cmap(PRECIP_COLORMAP, len(PRECIP_LEVELS_MM) - 1)
+    precip_norm = BoundaryNorm(PRECIP_LEVELS_MM, precip_cmap.N, clip=False)
+
+    enhancement_cmap = ListedColormap(ENHANCEMENT_COLORS)
+    enhancement_norm = BoundaryNorm(
+        ENHANCEMENT_LEVELS_MM, enhancement_cmap.N, clip=False
+    )
+
+    plot_specs = [
+        {
+            "values": noseed,
+            "title": "NOSEED accumulated precipitation",
+            "filename": "noseed_precip_ncl_style.png",
+            "levels": PRECIP_LEVELS_MM,
+            "cmap": precip_cmap,
+            "norm": precip_norm,
+            "extend": "max",
+        },
+        {
+            "values": seed,
+            "title": "SEED accumulated precipitation",
+            "filename": "seed_precip_ncl_style.png",
+            "levels": PRECIP_LEVELS_MM,
+            "cmap": precip_cmap,
+            "norm": precip_norm,
+            "extend": "max",
+        },
+        {
+            "values": enhancement,
+            "title": "Precipitation enhancement (SEED - NOSEED)",
+            "filename": "enhancement_ncl_style.png",
+            "levels": ENHANCEMENT_LEVELS_MM,
+            "cmap": enhancement_cmap,
+            "norm": enhancement_norm,
+            "extend": "both",
+        },
     ]
 
-    for values, title, units, filename, cmap in figures:
-        fig, ax = plt.subplots(figsize=(9, 8))
-        kwargs = {"shading": "auto"}
-        if cmap is not None:
-            kwargs["cmap"] = cmap
-        mesh = ax.pcolormesh(lon, lat, values, **kwargs)
-        ax.scatter([center_lon], [center_lat], marker="*", s=100, label=ASOS_STATION_NAME)
-        ax.set_xlabel("Longitude")
-        ax.set_ylabel("Latitude")
-        ax.set_title(f"{case_name}: {title}")
-        ax.legend(loc="best")
-        cbar = fig.colorbar(mesh, ax=ax)
-        cbar.set_label(units)
+    lon_min, lon_max = float(np.nanmin(lon)), float(np.nanmax(lon))
+    lat_min, lat_max = float(np.nanmin(lat)), float(np.nanmax(lat))
+
+    for spec in plot_specs:
+        fig, ax = plt.subplots(figsize=(10, 8.5))
+
+        contour = ax.contourf(
+            lon, lat, spec["values"],
+            levels=spec["levels"],
+            cmap=spec["cmap"],
+            norm=spec["norm"],
+            extend=spec["extend"],
+            antialiased=False,
+            zorder=1,
+        )
+
+        add_map_lines(ax, map_segments)
+
+        ax.scatter(
+            ASOS_LON, ASOS_LAT, marker="*", s=145,
+            facecolor="red", edgecolor="black", linewidth=0.7,
+            label=f"{ASOS_STATION_NAME} ASOS ({ASOS_STATION_ID})", zorder=8,
+        )
+        ax.scatter(
+            center_lon, center_lat, marker="o", s=38,
+            facecolor="none", edgecolor="black", linewidth=1.0,
+            label="Nearest WRF grid", zorder=8,
+        )
+
+        ax.set_xlim(lon_min, lon_max)
+        ax.set_ylim(lat_min, lat_max)
+        ax.set_aspect(1.0 / math.cos(math.radians((lat_min + lat_max) / 2.0)))
+        ax.set_xlabel("Longitude (°E)")
+        ax.set_ylabel("Latitude (°N)")
+        ax.set_title(f"{case_name}: {spec['title']}", fontsize=14, pad=10)
+        ax.tick_params(direction="out", top=False, right=False)
+        ax.grid(False)
+        ax.legend(loc="upper right", frameon=True, fontsize=9)
+
+        cbar = fig.colorbar(
+            contour, ax=ax, orientation="vertical",
+            pad=0.025, fraction=0.048, ticks=spec["levels"],
+        )
+        cbar.set_label("mm")
+        cbar.ax.tick_params(labelsize=9)
+
         fig.tight_layout()
-        fig.savefig(output_dir / filename, dpi=200, bbox_inches="tight")
+        fig.savefig(
+            output_dir / spec["filename"],
+            dpi=FIGURE_DPI, bbox_inches="tight", facecolor="white",
+        )
         plt.close(fig)
 
 
