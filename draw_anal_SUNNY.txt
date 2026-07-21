@@ -1,0 +1,1402 @@
+load "/opt/kma/kma_lib/apps/ncl/6.6.2/INTEL/200_png16/lib/ncarg/nclscripts/csm/gsn_code.ncl"
+load "/opt/kma/kma_lib/apps/ncl/6.6.2/INTEL/200_png16/lib/ncarg/nclscripts/csm/gsn_csm.ncl"
+load "/opt/kma/kma_lib/apps/ncl/6.6.2/INTEL/200_png16/lib/ncarg/nclscripts/csm/contributed.ncl"
+load "/opt/kma/kma_lib/apps/ncl/6.6.2/INTEL/200_png16/lib/ncarg/nclscripts/wrf/WRF_contributed.ncl"
+load "/opt/kma/kma_lib/apps/ncl/6.6.2/INTEL/200_png16/lib/ncarg/nclscripts/wrf/WRFUserARW.ncl"
+load "/h3/home/nimr/joonghyun/fcst/MODL/RAMA_38/NCLD/lib/common_env.ncl"
+load "/h3/home/nimr/joonghyun/fcst/MODL/RAMA_38/NCLD/lib/datecontrol.ncl"
+load "/h3/home/nimr/joonghyun/fcst/MODL/RAMA_38/NCLD/lib/cmaqfiles.ncl"
+load "/h3/home/nimr/joonghyun/fcst/MODL/RAMA_38/NCLD/lib/kma2d.ncl"
+
+begin
+ mother_model  = getenv("mother_model")
+ T_name        = getenv("T_name")
+ workdir       = getenv("WORKDIR")
+ metdir        = getenv("METDIR")
+ wrf_cntl      = getenv("WRF_CNTL")
+ wrf_expr      = getenv("WRF_EXPR")
+ print("TEST")
+ print(wrf_expr)
+ print("TEST")
+
+ fcst          = toint(getenv("FCST_TIME"))
+ initdate      = toint(getenv("INITDATE"))
+ fname         = getenv("STATION_INFO")
+ s_info        = asciiread(fname,-1,"string")
+ s_name        = str_get_field(s_info,1," ")
+ lat1          = stringtofloat(str_get_field(s_info,2," "))
+ lon1          = stringtofloat(str_get_field(s_info,3," "))
+
+ korea_map_fn  = getenv("KOREA_MAP")
+ fout          = getenv("OUTROOT")
+ agic          = getenv("agic")
+ s_hgt         = toint(getenv("s_hgt"))
+
+ effect_start  = toint(getenv("effect_start"))
+ effect_end    = toint(getenv("effect_end"))
+
+ ns = 0
+ ne = 0
+ do i=0,23
+   caldate     = toint(cal_yyyymmddhhmi(initdate*100q,i,False)/100q)
+   if ( caldate .eq. effect_start ) then
+     ns        = i
+   end if
+   if ( caldate .eq. effect_end ) then
+     ne        = i
+   end if
+ end do
+
+;print(initdate)
+;print(effect_start)
+;print(effect_end)
+;print(ns)
+;print(ne)
+
+;-----------------------------------------------------------------------------
+; read AWS
+
+ aws_file      = getenv("AWS")
+ aws           = asciiread(aws_file, -1, "string")
+ aws_time      = toint(str_get_cols(aws, 0, 9))
+ aws_id        = toint(str_get_field(aws, 2, " "))
+ aws_rain      = tofloat(str_get_field(aws, 7, " "))
+ naws          = dimsizes(aws_id)
+ aws_lat       = new(naws, float, -9999)
+ aws_lon       = new(naws, float, -9999)
+ aws_time_to_UTC  = new(naws, integer, -9999)
+
+ aws_site_file = "/h3/home/nimr/imyunkyu/fcst/MODL/RAMA/DABA/aws_site.txt"
+ aws_site      = asciiread(aws_site_file, -1, "string")
+ aws_site_id   = toint(str_get_field(aws_site, 1, " "))
+ aws_site_lon  = tofloat(str_get_field(aws_site, 2, " "))
+ aws_site_lat  = tofloat(str_get_field(aws_site, 3, " "))
+
+   do i=0, naws-1
+     idxx = ind(aws_site_id .eq. aws_id(i))
+     if ( .not. ismissing(idxx) .and. dimsizes(idxx) > 0 ) then
+       aws_lat(i) = aws_site_lat(idxx(0)) 
+       aws_lon(i) = aws_site_lon(idxx(0)) 
+     end if
+       aws_time_to_UTC(i)    = toint(cal_yyyymmddhhmi(aws_time(i)*100q,-9,False)/100q)
+    ;  print(aws_time_to_UTC(i))
+   end do
+;-----------------------------------------------------------------------------
+
+;-----------------------------------------------------------------------------
+;read from WRF
+
+ f         = addfile(wrf_cntl + ".nc","r")
+ f2        = addfile(wrf_expr + ".nc","r")
+
+ latc      = f->XLAT(0,:,:)
+ lonc      = f->XLONG(0,:,:)
+ landmask  = f->LANDMASK(0,:,:)
+
+; print(fcst)
+ rn_cntl   = f->RAINNC(fcst-24:,:,:)
+ rn_cntl   = where(rn_cntl .lt. 0., 0,rn_cntl)
+ rain_cntl = rn_cntl 
+ rn_expr   = f2->RAINNC(fcst-24:,:,:)
+ rn_expr   = where(rn_expr .lt. 0., 0,rn_expr)
+ rain_expr = rn_expr 
+
+ dim     = dimsizes(rain_expr)
+
+ times   = dim(0)
+ ny      = dim(1)
+ nx      = dim(2)
+ nz      = toint(39)
+
+ sm1     = f2->CCNTRACER(fcst-24:,:,:ny-1,:nx-1)      ; (t,z,y,x)  /kg
+ sm2     = f2->QNTRACER(fcst-24:,:,:ny-1,:nx-1)       ; (t,z,y,x)  /kg
+ qc      = f2->QCLOUD(fcst-24:,:,:ny-1,:nx-1)
+ wwind   = f->W(fcst-24:,:nz-1,:ny-1,:nx-1)
+
+ print("end reading of ccntracer") 
+; print(agic) 
+
+ lwc     = 1.2*qc*1000
+ lwc_t   = dim_sum_n(lwc,1)         ; sum vertical
+
+ if ( agic .eq. "c_air.seed.txt" ) then
+   sm        = sm1
+   seed_name = "Cacl2"
+   seed_1line= getenv("cacl2_fn")
+ end if
+ if ( agic .eq. "air.seed.txt" ) then
+   sm      = sm2
+   seed_name = "AgI"
+   seed_1line= getenv("agi_fn") 
+ end if
+
+; read air seeding line
+ f_air_seed  = workdir + "/" + agic
+ air_seed_temp = asciiread(f_air_seed,-1,"string")
+ imsi_z        = toint(str_get_field(air_seed_temp,2," ")) 
+ idx_air       = ind(imsi_z .ne. 1)                             ; sort ground
+ air_seed      = air_seed_temp(idx_air) 
+
+ air_seed_i  = toint(str_get_field(air_seed,3," "))   ; x (i) grid
+ air_seed_j  = toint(str_get_field(air_seed,4," "))   ; y (j) grid
+
+ air_seed_lat= new( (/dimsizes(air_seed_i)/), "float" )
+ air_seed_lon= new( (/dimsizes(air_seed_i)/), "float" )
+
+ seed_level0 = asciiread(seed_1line,-1,"string")
+ seed_level  = toint(str_get_field(seed_level0,2,","))   ; x (i) grid
+;;
+;;
+ do i=0,dimsizes(air_seed_i)-1
+ air_seed_lat(i)= latc(air_seed_j(i),air_seed_i(i))
+ air_seed_lon(i)= lonc(air_seed_j(i),air_seed_i(i))
+ end do
+
+
+ sm@_FillValue = -999
+ sm     := where( sm .lt. 0 , sm@_FillValue, sm )
+
+ zlayer  = wrf_user_getvar(f,"z",1)
+
+ depth   = new( (/nz,ny,nx/),"float" )
+ do ll=0,nz-2
+ depth(ll,:,:) = zlayer(ll+1,:,:)-zlayer(ll,:,:)
+ end do
+ depth(nz-1,:,:)=zlayer(nz-1,:,:)-zlayer(nz-2,:,:) 
+
+
+ density = 1.2
+ cacl2   = density * sm                 ; /m3 
+
+
+ weight_file    = getenv("weight_file")
+ cacl2_weight   = cacl2(:,0,:,:) * 5.289*0.000000001    ; only cacl2 case is available
+ alist          = [/avg(cacl2(:,0,:,:)), max(cacl2(:,0,:,:)), avg(cacl2_weight), max(cacl2_weight)/]
+; write_table(weight_file,"w",alist,"%20.12f,%20.12f,%20.12f,%20.12f")  
+ write_table(weight_file,"w",alist,"%e,%e,%e,%e")  
+
+; define the draw_value
+  draw_value  = new ( dimsizes(cacl2(0,0,:,:)), "float")
+;  print(dimsizes(cacl2(0,0,:,:)))
+  draw_value@lat2d    = latc
+  draw_value@lon2d    = lonc
+  draw_value@P_ALP    = 30.
+  draw_value@P_BET    = 60.
+  draw_value@P_GAM    = 128.
+
+
+
+;============================================================================
+; loop by time
+;-----------------------------------------------------------------------------
+   idx_24               = ind(aws_id .eq. 100)
+   time_24              = aws_time(idx_24)              ; time by 1 hour 
+
+;============================================================================
+; Start Modeling Post
+;============================================================================
+do nt = 1, times-1
+
+;===========================================================================
+; draw map
+;---------------------------------------------------------------------------
+   wks_type = "png"
+;   wks_type@wkHeight    = 1500
+;   wks_type@wkWidth     = 1500
+
+;Target Site lat and lon
+ idx     = ind ( T_name .eq. s_name )
+ t_lat   = lat1(idx)
+ t_lon   = lon1(idx)
+
+; t_lat   = 36.6542
+; t_lon   = 128.5759
+
+;end Target
+
+;---------------------------------------------------------------------------
+; Start AWS Post every 1hour
+;---------------------------------------------------------------------------
+
+  wks_type = "png"
+  wks_type@wkHeight    = 1500
+  wks_type@wkWidth     = 1500
+
+  res1                              = True
+  res1@gsnFrame                           = False
+  res1@gsnDraw                            = False
+  res1@mpOutlineOn                  = False
+  res1@mpOutlineBoundarySets        = "NoBoundaries"
+  res1@mpGridAndLimbDrawOrder      = "Predraw"
+  res1@mpGridSpacingF               = 1.
+  res1@pmTickMarkDisplayMode        = "Never"
+  res1@mpFillOn = True                ; Áµµ¿ì .¼ºȭ
+  res1@mpLandFillColor = "white"       ; 0.¸¦ È.¼³d  
+  res1@mpOceanFillColor = "white"      ; ¹ٴٸ¦ .¼³dÎ  
+  res1@mpInlandWaterFillColor = "white"; ³.·úª; È»¼³d 
+  res1@mpAreaMaskingOn = True          ; ¿.¿ª ¸¶½ºŷ ¼ºȭ
+  res1@mpPerimOn = False               ; Áµ¿û°ÅOD
+  res1@mpLeftCornerLatF              = 36.461
+  res1@mpLeftCornerLonF              = 126.939
+  res1@mpRightCornerLatF             = 39.527
+  res1@mpRightCornerLonF             = 130.085
+  res1@mpLimitMode                   = "Corners"    ; choose range of map
+
+  res1@lbAutoManage                 = False
+  res1@lbLabelFont                  = "helvetica-bold"
+  res1@lbLabelJust                  = "CenterRight"
+  res1@lbLabelFontHeightF           = 0.006
+
+  res1@tmXTOn                             = False
+  res1@tmXBOn                             = False
+  res1@tmYLOn                             = False
+  res1@tmYROn                             = False
+
+
+
+ validate= toint(cal_yyyymmddhhmi(initdate*100q,fcst-24+nt,False)/100q)
+
+ ua = wrf_user_getvar(f,"ua",nt)
+; ua = ua*1.943844
+ va = wrf_user_getvar(f,"va",nt)
+; va = va*1.943844
+
+; u_plane = wrf_user_intrp3d(ua(:,:,:),zlayer,"h",2881.,0.,False)
+; v_plane = wrf_user_intrp3d(va(:,:,:),zlayer,"h",2881.,0.,False)
+ u_plane = wrf_user_intrp3d(ua(:,:,:),zlayer,"h",s_hgt,0.,False)
+ v_plane = wrf_user_intrp3d(va(:,:,:),zlayer,"h",s_hgt,0.,False)
+
+;---------------------------------------------------------------------------
+; 1. AWS rain
+;---------------------------------------------------------------------------
+do n1=1, dimsizes(time_24)-1
+
+; aws_date= toint(cal_yyyymmddhhmi(time_24(n1)*100q, n1-9, False)/100q)    ; UTC
+ aws_date= toint(cal_yyyymmddhhmi(time_24(n1)*100q, -9, False)/100q)    ; UTC
+
+
+;  print(validate)
+;  print(aws_date)
+
+  if (validate .eq. aws_date ) then
+
+
+  wks = gsn_open_wks(wks_type, fout + "/" + mother_model + "_" + T_name + "_aws_rain" + sprinti("%0.3i",n1) )
+  gsn_define_colormap(wks,"MPL_gist_rainbow")
+
+  plot     = gsn_csm_map(wks,res1)
+
+  idx_site = ind(aws_time .eq. time_24(n1))          ; sort site every 1 hour 
+
+  data_id        = aws_id(idx_site)
+  data_rain      = aws_rain(idx_site)
+  data_lat       = aws_lat(idx_site)
+  data_lon       = aws_lon(idx_site)
+
+  color_list     = new(dimsizes(data_id), "integer")
+
+  color_list     = where(                             data_rain .le.  0.1, 0, color_list)
+  color_list     = where(data_rain .gt. 0.1 .and.     data_rain .le.  0.2,28, color_list)
+  color_list     = where(data_rain .gt. 0.2 .and.     data_rain .le.  0.4,26, color_list)
+  color_list     = where(data_rain .gt. 0.4 .and.     data_rain .le.  0.6,24, color_list)
+  color_list     = where(data_rain .gt. 0.6 .and.     data_rain .le.  0.8,22, color_list)
+  color_list     = where(data_rain .gt. 0.8 .and.     data_rain .le.  1.0,20, color_list)
+  color_list     = where(data_rain .gt. 1.0 .and.     data_rain .le.  1.2,40, color_list)
+  color_list     = where(data_rain .gt. 1.2 .and.     data_rain .le.  1.4,45, color_list)
+  color_list     = where(data_rain .gt. 1.4 .and.     data_rain .le.  1.6,50, color_list)
+  color_list     = where(data_rain .gt. 1.6 .and.     data_rain .le.  1.8,55, color_list)
+  color_list     = where(data_rain .gt. 1.8 .and.     data_rain .le.  2.0,65, color_list)
+  color_list     = where(data_rain .gt. 2.0 .and.     data_rain .le.  2.2,70, color_list)
+  color_list     = where(data_rain .gt. 2.2 .and.     data_rain .le.  2.4,73, color_list)
+  color_list     = where(data_rain .gt. 2.4 .and.     data_rain .le.  2.6,76, color_list)
+  color_list     = where(data_rain .gt. 2.6 .and.     data_rain .le.  2.8,79, color_list)
+  color_list     = where(data_rain .gt. 2.8 .and.     data_rain .le.  3.0,82, color_list)
+  color_list     = where(data_rain .gt. 3.0 .and.     data_rain .le.  3.2,85, color_list)
+  color_list     = where(data_rain .gt. 3.2 .and.     data_rain .le.  3.4,88, color_list)
+  color_list     = where(data_rain .gt. 3.4 .and.     data_rain .le.  3.6,91, color_list)
+  color_list     = where(data_rain .gt. 3.6 .and.     data_rain .le.  3.8,94, color_list)
+  color_list     = where(data_rain .gt. 3.8 .and.     data_rain .le.  4.0,97, color_list)
+  color_list     = where(data_rain .gt. 4.0 .and.     data_rain .le.  4.2,105, color_list)
+  color_list     = where(data_rain .gt. 4.2 .and.     data_rain .le.  4.4,107, color_list)
+  color_list     = where(data_rain .gt. 4.4 .and.     data_rain .le.  4.6,109, color_list)
+  color_list     = where(data_rain .gt. 4.6 .and.     data_rain .le.  4.8,111, color_list)
+  color_list     = where(data_rain .gt. 4.8 .and.     data_rain .le.  5.0,112, color_list)
+  color_list     = where(                             data_rain .gt.  5.0, 2, color_list)
+
+  
+
+  polyres = True
+  polyres@gsMarkerIndex            = 16
+  polyres@gsMarkerSizeF            = 0.01
+  polyres@gsMarkerColor            = "white"
+
+  polyres1 = True
+  polyres1@gsMarkerIndex            = 4
+  polyres1@gsMarkerSizeF            = 0.01
+  polyres1@gsMarkerColor            = "black"
+
+
+
+  dummy1         = new ( dimsizes(data_rain), "graphic" )
+  dummy2         = new ( dimsizes(data_rain), "graphic" )
+
+  do n2 = 0, dimsizes(data_rain) - 1
+    if ( .not. ismissing(color_list(n2)) .and. color_list(n2) .ne. 0 ) then
+      polyres@gsMarkerColor          = color_list(n2)
+      dummy1(n2)     = gsn_add_polymarker(wks, plot, data_lon(n2), data_lat(n2), polyres)
+      dummy2(n2)     = gsn_add_polymarker(wks, plot, data_lon(n2), data_lat(n2), polyres1)
+    end if
+  end do
+
+; add korea do line
+  korea_lineYN = True
+
+  ad_line = korea_map_fn
+
+    if ( korea_lineYN ) then
+      lines = asciiread(ad_line, -1, "string")
+;      print(lines)
+      delim = " "
+      respg            = True
+      respg@gsLineColor = "black"
+      respg@gsLineThicknessF = 2.
+
+      dum = new (1000,graphic)
+      j = 0
+      do i = 0, dimsizes(lines) - 1
+;     print((/lines(i)/))
+        num_l  = toint(str_get_field(lines(i),1,delim))
+        info   = toint(str_get_field(lines(i),2,delim))
+;   print((/info/))
+;       if ( info .eq. 2 .or. info .eq. 3 ) then
+        if ( info .eq. 0 .or. info .eq. 2 ) then
+          line_lon = tofloat(str_get_field(lines(i+1:i+num_l), 1, delim))
+          line_lat = tofloat(str_get_field(lines(i+1:i+num_l), 2, delim))
+          if ( info .eq. 0 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 0
+          end if
+          if ( info .eq. 2 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 0
+          end if
+          if ( info .eq. 3 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 1
+          end if
+          dum(j) = gsn_add_polyline (wks, plot, line_lon, line_lat, respg)
+          j = j + 1
+          delete(line_lon)
+          delete(line_lat)
+        end if
+        i = i + num_l
+      end do
+    end if        ; korea_lineYN
+
+
+  getvalues plot
+    "vpXF"      : vpx
+    "vpYF"      : vpy
+    "vpWidthF"  : vpw
+    "vpHeightF" : vph
+  end getvalues
+
+
+  lbres                        = True
+
+  lbres@vpWidthF               = 0.04
+  lbres@vpHeightF              = vph
+  lbres@lbPerimOn              = False               ; no label bar box
+  lbres@lbOrientation          = "Vertical"          ; orientation
+  lbres@lbLabelFont            = "helvetica"         ; label font 
+  lbres@lbLabelFontHeightF     = 0.006               ; label font height
+  lbres@lbLabelJust            = "CenterRight"
+  lbres@lbLabelAlignment       = "InteriorEdges"     ; where to label
+  lbres@lbMonoFillPattern      = True                ; fill sold
+  lbres@cnLevelSelectionMode   = "ExplicitLevels"
+  levels                       = (/ 0.1,0.2,0.4,0.6,0.8,1.0,1.2,1.4,1.6,1.8,2.0,2.2,2.4,2.6,2.8,3.0,3.2,3.4,3.6,3.8,4.0,4.2,4.4,4.6,4.8, 5.0 /)
+  lbres@cnSpanFillPalette      = True
+
+  if ( isdefined("labels") ) then
+    delete(labels)
+  end if
+
+  labels                       = levels
+
+  nlevels = dimsizes(levels)
+  lbres@lbFillColors           = (/0,28,26,24,22,20,40,45,50,55,65,70,73,76,79,82,85,88,91,94,97,105,107,109,111,112,2/)
+  lbres@cnLabelBarEndStyle     = "ExcludeOuterBoxes"
+
+  lbid = gsn_create_labelbar(wks, nlevels+1, sprintf("%4.1f",labels), lbres)
+
+  amres_label                  = True
+  amres_label@amJust           = "CenterLeft"
+  amres_label@amParallelPosF   = 0.52
+  amres_label@amOrthogonalPosF = 0.0
+  annoid_labelbar              = gsn_add_annotation(plot, lbid, amres_label)
+
+
+draw(plot)
+frame(wks)
+
+delete(plot)
+delete(wks)
+
+
+  end if
+
+end do     ;n1
+
+
+;---------------------------------------------------------------------------
+; 1.Seeding Particle disperson
+;---------------------------------------------------------------------------
+  draw_data           =  cacl2(nt,:,:,:) * depth      ; 
+  draw_value          = (/dim_sum_n(draw_data, 0)/)     ; total cacl2  /m2 
+
+  wks = gsn_open_wks(wks_type, fout + "/" + mother_model + "_" + T_name + "_conc_f" + sprinti("%0.3i",nt) )
+; gsn_define_colormap(wks, "WhiteBlueGreenYellowRed")
+  gsn_define_colormap(wks, "GMT_haxby")
+
+  res1                              = True
+  res1@mpOutlineOn                  = False
+  res1@mpOutlineBoundarySets        = "NoBoundaries"
+  res1@mpGridSpacingF               = 1.
+  res1@pmTickMarkDisplayMode        = "Never"
+
+
+;  res1@cnLevels := (/1,10,100,1000,10000,100000,1000000,10000000,100000000/)
+
+  res1@cnLevels := (/1,10,100,1000,10000,100000,1000000,10000000,100000000,1E+09,1E+10,1E+11,1E+12/)
+  res1@cnFillColors  := (/0,23,22,21,20,19,18,17,16,15,14,13,12,11/)
+
+  res1@lbAutoManage                 = False
+  res1@lbLabelFont                  = "helvetica-bold"
+  res1@lbLabelJust                  = "CenterRight"
+  res1@lbLabelFontHeightF           = 0.006
+
+;  res1@mpLeftCornerLatF              = 36.4605
+;  res1@mpLeftCornerLonF              = 126.939
+;  res1@mpRightCornerLatF             = 39.5273
+;  res1@mpRightCornerLonF             = 130.085
+  res1@mpLimitMode                   = "Corners"    ; choose range of map
+;  res1@mpLeftCornerLatF              = t_lat - 1.5
+;  res1@mpLeftCornerLonF              = t_lon - 2.0
+;  res1@mpRightCornerLatF             = t_lat + 1.5
+;  res1@mpRightCornerLonF             = t_lon + 2.0
+;  res1@mpLimitMode                   = "Corners"    ; choose range of map
+
+; windbarb options
+  resv = True
+  resv@gsnFrame = False
+  resv@gsnDraw = False
+  resv@vcGlyphStyle = "WindBarb"
+  resv@vcWindBarbLineThicknessF = 2
+  resv@vcRefAnnoOn = False
+  resv@vcRefLengthF = 0.02
+  resv@vcMinDistanceF = 0.02
+  resv@vcWindBarbTickLengthF = 0.3
+  resv@vcWindBarbColor = "black"
+  resv@tfDoNDCOverlay = True
+  resv@tmXTOn = False
+  resv@tmXBOn = False
+  resv@tmYLOn = False
+  resv@tmYROn = False
+  resv@gsnLeftString = ""
+  resv@gsnRightString = ""
+  resv@vcRefAnnoSide = "Bottom"
+  resv@vcRefAnnoOrthogonalPosF = -0.05
+  resv@vcRefAnnoParallelPosF = 1.2
+
+
+  polyres = True
+  polyres@gsMarkerIndex            = 16
+  polyres@gsMarkerSizeF            = 0.005
+  polyres@gsMarkerColor            ="black"
+
+  polyres@gsLineColor               = "black"
+  polyres@gsLineThicknessF          = 4. 
+ 
+;  polyres1 = False
+  polyres1 = True
+  polyres1@gsMarkerIndex            = 16
+  polyres1@gsMarkerSizeF            = 0.005
+  polyres1@gsMarkerColor            ="darkgreen"
+  
+  polyres12 = True
+  polyres12@gsLineColor             = "black"
+  polyres12@gsLineThicknessF        = 2.
+
+  polyres3= False
+;  polyres3= True
+  polyres3@gsMarkerIndex            = 16
+  polyres3@gsMarkerSizeF            = 0.01
+  polyres3@gsMarkerColor            ="red"
+
+;   print(draw_value.eq.draw_value@_FillValue)
+;   print(ismissing(draw_value))
+  draw_value2 = where( ismissing(draw_value),0,draw_value)
+;  print(dimsizes(draw_value2(:,:)))
+;  print(max(draw_value2(:,:)))
+;  print(min(draw_value2(:,:)))
+;  print(sum(draw_value2(:,:)))
+  plot     = kmacmaq2dcn_map(wks,draw_value,res1)
+;  plot     = gsn_csm_contour_map(wks,draw_value,res1)
+  plot_vc  = gsn_csm_vector(wks,u_plane,v_plane, resv)
+  overlay(plot, plot_vc)
+;  dum2     = gsn_add_polymarker(wks,plot,lon1,lat1,polyres1)
+;  dum3     = gsn_add_polymarker(wks,plot,t_lon,t_lat,polyres3)
+;;  dum4     = gsn_add_polyline(wks,plot,air_seed_lon,air_seed_lat,polyres)   ; air seeding line
+
+
+   idx_24a             = ind(aws_time_to_UTC .ge. effect_start .and. aws_time_to_UTC .le. effect_end )
+   data_time           = aws_time_to_UTC(idx_24a)
+   data_rain2          = aws_rain(idx_24a)
+   data_id2            = aws_id(idx_24a)
+   data_lat2           = aws_lat(idx_24a)
+   data_lon2           = aws_lon(idx_24a)
+
+   idx_site            = ind(data_time .eq. effect_start)          ; sort site every 1 hour
+   data_id             = data_id2(idx_site)
+   data_lat            = data_lat2(idx_site)
+   data_lon            = data_lon2(idx_site)
+   dummy5        = new ( dimsizes(idx_site), "graphic" )
+
+   do n2 = 0, dimsizes(idx_site) - 1
+      dummy5(n2)     = gsn_add_polymarker(wks, plot, data_lon(n2), data_lat(n2), polyres1)
+   end do
+
+
+; add korea do line
+  korea_lineYN = True
+ 
+  ad_line = korea_map_fn
+
+    if ( korea_lineYN ) then
+      lines = asciiread(ad_line, -1, "string")
+      delim = " "
+      respg            = True
+      respg@gsLineColor = "black"
+      respg@gsLineThicknessF = 2.
+
+      dum = new (1000,graphic)
+      j = 0
+      do i = 0, dimsizes(lines) - 1
+;     print((/lines(i)/))
+        num_l  = toint(str_get_field(lines(i),1,delim))
+        info   = toint(str_get_field(lines(i),2,delim))
+;   print((/info/))
+;       if ( info .eq. 2 .or. info .eq. 3 ) then
+        if ( info .eq. 0 .or. info .eq. 2 ) then
+          line_lon = tofloat(str_get_field(lines(i+1:i+num_l), 1, delim))
+          line_lat = tofloat(str_get_field(lines(i+1:i+num_l), 2, delim))
+          if ( info .eq. 0 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 0
+          end if
+          if ( info .eq. 2 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 0
+          end if
+          if ( info .eq. 3 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 1
+          end if
+          dum(j) = gsn_add_polyline (wks, plot, line_lon, line_lat, respg)
+          j = j + 1
+          delete(line_lon)
+          delete(line_lat)
+        end if
+        i = i + num_l
+      end do
+    end if        ; korea_lineYN
+
+
+draw(plot)
+;addtickmarkcmaq (wks, plot)
+;addtimestampcmaq(wks, plot, initdate, validate)
+;addtitlecmaq    (wks, plot, seed_name + " Seeding Height : " + s_hgt + "[m]")
+;addlogo         (wks, plot, mother_model)
+
+frame(wks)
+delete(plot)
+delete(wks)
+
+
+;---------------------------------------------------------------------------
+; 2.difference rain amout
+;---------------------------------------------------------------------------
+  draw_temp1           = (rain_expr(nt,:,:) - rain_expr(nt-1,:,:)) ;  mm
+  draw_temp2           = (rain_cntl(nt,:,:) - rain_cntl(nt-1,:,:))
+  draw_data2           = draw_temp1 - draw_temp2
+  draw_value           =  (/draw_data2/)
+
+  wks = gsn_open_wks(wks_type, fout + "/" + mother_model + "_" + T_name + "_rain_f" + sprinti("%0.3i",nt))
+; gsn_define_colormap(wks, "BlAqGrWh2YeOrReVi22")
+; gsn_define_colormap(wks,"NEW_UKM_hadcrut")
+  gsn_define_colormap(wks,"UKM_hadcrut")
+
+  res12 = True
+  res12 = res1
+  res12@cnLevelSelectionMode       = "ExplicitLevels"
+;  res12@cnLevels            := (/-1,0.1,0.5,1,2,3/)
+;  res12@cnFillColors        := (/"cyan","white","orange","orangered1","orangered2","orangered3","red"/)
+
+  res12@cnLevels            := (/ -3,-2,-1 ,-0.1,-0.01 ,0.01 ,0.1,1,2,3/)
+  res12@cnFillColors        := (/2,3,4,5,7,0,10,11,12,13/)
+
+
+
+;  res12@cnLevels := (/-2,-1,-0.1,-0.01,0.01,0.1,1,2/)
+;  res12@cnFillColors := (/3,4,6,7,0,10,11,12,13/)
+
+
+;  res12@cnLevels := (/-2,-1,-0.1,-0.01,0.01,0.1,1,2/)
+;  res12@cnFillColors := (/3,4,6,7,0,10,11,12,13/)
+;  res12@cnLevels := (/-3,-2,-1,-0.1,0.1,1,2,3/)
+;  res12@cnFillColors := (/"blue4","blue4","blue","cyan","white","yellow","orange","red"/)
+
+;  res12@cnLevels            := (/-0.5,-0.1,0.1,0.5,1,2/)
+;  res12@cnFillColors        := (/6,7,0,10,11,12,13/) ;(/3,4,6,7,0,10,11,12,13/)
+;  print(draw_value)
+  plot     = kmacmaq2dcn_map(wks,draw_value,res12)
+;;  plot_vc  = gsn_csm_vector(wks,u_plane,v_plane, resv)
+;;  overlay(plot, plot_vc)
+; dum1     = gsn_add_polyline(wks,plot,lon,lat,polyres)
+;;  dum2     = gsn_add_polymarker(wks,plot,lon1,lat1,polyres1)
+;  dum3     = gsn_add_polymarker(wks,plot,t_lon,t_lat,polyres3)
+  dum4     = gsn_add_polyline(wks,plot,air_seed_lon,air_seed_lat,polyres)   ; air seeding line
+
+
+   idx_24a             = ind(aws_time_to_UTC .ge. effect_start .and. aws_time_to_UTC .le. effect_end )
+   data_time           = aws_time_to_UTC(idx_24a)
+   data_rain2          = aws_rain(idx_24a)
+   data_id2            = aws_id(idx_24a)
+   data_lat2           = aws_lat(idx_24a)
+   data_lon2           = aws_lon(idx_24a)
+
+   idx_site            = ind(data_time .eq. effect_start)          ; sort site every 1 hour
+   data_id             = data_id2(idx_site)
+   data_lat            = data_lat2(idx_site)
+   data_lon            = data_lon2(idx_site)
+
+   dummy4         = new ( dimsizes(idx_site), "graphic" )
+
+   do n2 = 0, dimsizes(idx_site) - 1
+     dummy4(n2)     = gsn_add_polymarker(wks, plot, data_lon(n2), data_lat(n2), polyres1)
+   end do
+
+
+
+
+; add korea do line
+  korea_lineYN = True
+
+  ad_line = korea_map_fn
+
+    if ( korea_lineYN ) then
+      lines = asciiread(ad_line, -1, "string")
+      delim = " "
+      respg            = True
+      respg@gsLineColor = "black"
+      respg@gsLineThicknessF = 2.
+
+      dum = new (1000,graphic)
+      j = 0
+      do i = 0, dimsizes(lines) - 1
+;     print((/lines(i)/))
+        num_l  = toint(str_get_field(lines(i),1,delim))
+        info   = toint(str_get_field(lines(i),2,delim))
+;   print((/info/))
+;       if ( info .eq. 2 .or. info .eq. 3 ) then
+        if ( info .eq. 0 .or. info .eq. 2 ) then
+          line_lon = tofloat(str_get_field(lines(i+1:i+num_l), 1, delim))
+          line_lat = tofloat(str_get_field(lines(i+1:i+num_l), 2, delim))
+          if ( info .eq. 0 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 0
+          end if
+          if ( info .eq. 2 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 0
+          end if
+          if ( info .eq. 3 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 1
+          end if
+          dum(j) = gsn_add_polyline (wks, plot, line_lon, line_lat, respg)
+          j = j + 1
+          delete(line_lon)
+          delete(line_lat)
+        end if
+        i = i + num_l
+      end do
+    end if        ; korea_lineYN
+
+
+draw(plot)
+;addtickmarkcmaq (wks, plot)
+;addtimestampcmaq(wks, plot, initdate, validate)
+;addtitlecmaq    (wks, plot, "Difference of Precipitation(EXPR-CNTL)[mm]")
+;addlogo         (wks, plot, mother_model)
+
+frame(wks)
+delete(plot)
+delete(wks)
+
+
+end do    ; nt
+
+
+;---------------------------------------------------------------------------
+; 4. AWS and seed 
+;---------------------------------------------------------------------------
+  wks = gsn_open_wks(wks_type, fout + "/" + mother_model + "_" + T_name + "_seed_acc" )
+
+;----------------------
+; Enhaced rain by model 
+;----------------------
+
+ print(dimsizes(draw_value))
+  gsn_define_colormap(wks,"seaice_2")
+
+
+;  res12@cnLevels = (/1,100,10000,1E+6,1E+8,1E+10/)
+;  res12@cnLevels            := (/-0.5,-0.1,0.1,0.5,1,2/)
+;  res12@cnFillColors        := (/6,7,0,10,11,12,13/) ;(/3,4,6,7,0,10,11,12,13/)
+;  res12@cnFillColors        := (/0,0,0,0,0,0,0/) ;(/3,4,6,7,0,10,11,12,13/)
+
+; plot     = kmacmaq2dcn_map(wks,draw_value,res12)
+
+;---------------------------
+; Seeding material diffusion
+;---------------------------
+;  print(ns)
+;  print(ne)
+;  print(dimsizes(cacl2(5,:,:,:)))
+;  print(dimsizes(cacl2(9,:,:,:)))
+;  print(dimsizes(cacl2(10,:,:,:)))
+;  print(dimsizes(cacl2))
+
+  draw_data3           =  dim_sum_n(cacl2(ns:ne,:,:,:),0)       ; 
+  draw_data4           =  draw_data3 * depth      ; 
+  draw_value           = (/dim_sum_n(draw_data4, 0)/)                  ; total cacl2  /m2 
+
+ ;---------------------------
+ ; Seeding material diffusion
+ ;---------------------------
+  ; seeding material contour
+  res12 = True
+  res12 = res1
+  res12@cnLevelSelectionMode       = "ExplicitLevels"
+  res12@gsnLeftString    = ""
+  res12@gsnRightString   = ""
+  res12@cnFillOn = False
+  res12@cnLinesOn = True
+  res12@cnMonoLineColor  = False
+  res12@cnLineDashPattern= 1
+  res12@cnLineLabelsOn   = False
+  res12@cnLineThicknessF = 4.0
+  res12@cnInfoLabelOn    = False
+  res12@cnLevels := (/1,100,10000,1E+6,1E+8,1E+10/)
+  res12@cnLineColors   := span_color_rgba("seaice_2",8)
+
+ 
+  res12@lbLabelBarOn                = True
+  res12@lbAutoManage                 = False
+  res12@lbLabelFont                  = "helvetica-bold"
+  res12@lbLabelJust                  = "CenterRight"
+  res12@lbLabelFontHeightF           = 0.006
+;  res12@lbLabelStrings  := (/1,100,10000,1E+6,1E+8,1E+10/)
+;  res12@lbFillColors  := (/2,4,6,8,9,11/)
+
+  plot     = kmacmaq2dcn_map(wks,draw_value,res12)
+;;  dum4     = gsn_add_polyline(wks,plot,air_seed_lon,air_seed_lat,polyres)   ; air seeding line
+
+;------------------
+; AWS acc process
+;------------------
+   idx_24a             = ind(aws_time_to_UTC .ge. effect_start .and. aws_time_to_UTC .le. effect_end )
+   data_time           = aws_time_to_UTC(idx_24a)
+   data_rain2          = aws_rain(idx_24a)
+   data_id2            = aws_id(idx_24a)
+   data_lat2           = aws_lat(idx_24a)
+   data_lon2           = aws_lon(idx_24a)
+
+   idx_site            = ind(data_time .eq. effect_start)          ; sort site every 1 hour 
+   data_id             = data_id2(idx_site)
+   data_lat            = data_lat2(idx_site)
+   data_lon            = data_lon2(idx_site)
+
+
+   data_rain           = data_id
+   data_rain           = 0.
+
+   do m=0, dimsizes(idx_site)-1
+     idx_m             = ind( data_id2 .eq. data_id(m) )
+     data_rain(m)      = sum(data_rain2(idx_m))
+   end do
+  ;   data_rain         = data_rain/10.
+;print(data_rain)
+
+
+  gsn_define_colormap(wks,"MPL_gist_rainbow")
+
+  color_list     = new(dimsizes(data_id), "integer")
+
+  color_list     = where(                             data_rain .le.  0.1, 0, color_list)
+  color_list     = where(data_rain .gt. 0.1 .and.     data_rain .le.  0.2,28, color_list)
+  color_list     = where(data_rain .gt. 0.2 .and.     data_rain .le.  0.4,26, color_list)
+  color_list     = where(data_rain .gt. 0.4 .and.     data_rain .le.  0.6,24, color_list)
+  color_list     = where(data_rain .gt. 0.6 .and.     data_rain .le.  0.8,22, color_list)
+  color_list     = where(data_rain .gt. 0.8 .and.     data_rain .le.  1.0,20, color_list)
+  color_list     = where(data_rain .gt. 1.0 .and.     data_rain .le.  1.2,40, color_list)
+  color_list     = where(data_rain .gt. 1.2 .and.     data_rain .le.  1.4,45, color_list)
+  color_list     = where(data_rain .gt. 1.4 .and.     data_rain .le.  1.6,50, color_list)
+  color_list     = where(data_rain .gt. 1.6 .and.     data_rain .le.  1.8,55, color_list)
+  color_list     = where(data_rain .gt. 1.8 .and.     data_rain .le.  2.0,65, color_list)
+  color_list     = where(data_rain .gt. 2.0 .and.     data_rain .le.  2.2,70, color_list)
+  color_list     = where(data_rain .gt. 2.2 .and.     data_rain .le.  2.4,73, color_list)
+  color_list     = where(data_rain .gt. 2.4 .and.     data_rain .le.  2.6,76, color_list)
+  color_list     = where(data_rain .gt. 2.6 .and.     data_rain .le.  2.8,79, color_list)
+  color_list     = where(data_rain .gt. 2.8 .and.     data_rain .le.  3.0,82, color_list)
+  color_list     = where(data_rain .gt. 3.0 .and.     data_rain .le.  3.2,85, color_list)
+  color_list     = where(data_rain .gt. 3.2 .and.     data_rain .le.  3.4,88, color_list)
+  color_list     = where(data_rain .gt. 3.4 .and.     data_rain .le.  3.6,91, color_list)
+  color_list     = where(data_rain .gt. 3.6 .and.     data_rain .le.  3.8,94, color_list)
+  color_list     = where(data_rain .gt. 3.8 .and.     data_rain .le.  4.0,97, color_list)
+  color_list     = where(data_rain .gt. 4.0 .and.     data_rain .le.  4.2,105, color_list)
+  color_list     = where(data_rain .gt. 4.2 .and.     data_rain .le.  4.4,107, color_list)
+  color_list     = where(data_rain .gt. 4.4 .and.     data_rain .le.  4.6,109, color_list)
+  color_list     = where(data_rain .gt. 4.6 .and.     data_rain .le.  4.8,111, color_list)
+  color_list     = where(data_rain .gt. 4.8 .and.     data_rain .le.  5.0,112, color_list)
+  color_list     = where(                             data_rain .gt.  5.0, 2, color_list)
+
+  polyres = True
+  polyres@gsMarkerIndex            = 16
+  polyres@gsMarkerSizeF            = 0.005
+  polyres@gsMarkerColor            = "white"
+
+  polyres1 = True
+  polyres1@gsMarkerIndex            = 4
+  polyres1@gsMarkerSizeF            = 0.005
+  polyres1@gsMarkerColor            = "black"
+
+; End AWS
+
+  dummy6         = new ( dimsizes(idx_site), "graphic" )
+  dummy7         = new ( dimsizes(idx_site), "graphic" )
+  do n2 = 0, dimsizes(idx_site) - 1
+    if ( .not. ismissing(color_list(n2)) ) then
+      polyres@gsMarkerColor          = color_list(n2)
+      dummy6(n2)     = gsn_add_polymarker(wks, plot, data_lon(n2), data_lat(n2), polyres)
+      dummy7(n2)     = gsn_add_polymarker(wks, plot, data_lon(n2), data_lat(n2), polyres1)
+    end if
+  end do
+
+;-------------------
+; add korea do line
+;-------------------
+  korea_lineYN = True
+  ad_line = korea_map_fn
+
+    if ( korea_lineYN ) then
+      lines = asciiread(ad_line, -1, "string")
+      delim = " "
+      respg            = True
+      respg@gsLineColor = "black"
+      respg@gsLineThicknessF = 2.
+      respg@mpMinLatF = min(latc)
+      respg@mpMaxLatF = max(latc)
+      respg@mpMinLonF = min(lonc)
+      respg@mpMaxLonF = max(lonc)
+;      print(min(latc))
+;      print(max(latc))
+;      print(min(lonc))
+;      print(max(lonc))
+      dum = new (1000,graphic)
+      j = 0
+      do i = 0, dimsizes(lines) - 1
+;     print((/lines(i)/))
+        num_l  = toint(str_get_field(lines(i),1,delim))
+        info   = toint(str_get_field(lines(i),2,delim))
+;   print((/info/))
+;       if ( info .eq. 2 .or. info .eq. 3 ) then
+        if ( info .eq. 0 .or. info .eq. 2 ) then
+          line_lon = tofloat(str_get_field(lines(i+1:i+num_l), 1, delim))
+          line_lat = tofloat(str_get_field(lines(i+1:i+num_l), 2, delim))
+          if ( info .eq. 0 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 0
+          end if
+          if ( info .eq. 2 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 0
+          end if
+          if ( info .eq. 3 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 1
+          end if
+          dum(j) = gsn_add_polyline (wks, plot, line_lon, line_lat, respg)
+          j = j + 1
+          delete(line_lon)
+          delete(line_lat)
+        end if
+        i = i + num_l
+      end do
+    end if        ; korea_lineYN
+
+draw(plot)
+addtickmarkcmaq (wks, plot)
+;addtimestampcmaq(wks, plot2, initdate, validate)
+;addtitlecmaq    (wks, plot2, "Enhanced Rain(18~21 hour)[mm]")
+;addlogo         (wks, plot2, mother_model)
+
+frame(wks)
+delete(plot)
+delete(wks)
+
+
+
+;---------------------------------------------------------------------------
+; 5. AWS and Model Rain
+;---------------------------------------------------------------------------
+  wks1 = gsn_open_wks(wks_type, fout + "/" + mother_model + "_" + T_name + "_rain_AWS" )
+
+;----------------------
+; Enhaced rain by model
+;----------------------
+  draw_temp1           = (rain_expr(ne,:,:) - rain_expr(ns,:,:)) ;  mm
+  draw_temp2           = (rain_cntl(ne,:,:) - rain_cntl(ns,:,:))
+  draw_data2           = draw_temp1 - draw_temp2
+  draw_value           =  (/draw_data2/)
+
+;  gsn_define_colormap(wks1,"UKM_hadcrut")
+
+  res12 = True
+  res12 = res1
+  res12@cnLevelSelectionMode       = "ExplicitLevels"
+  res12@gsnLeftString    = ""
+  res12@gsnRightString   = ""
+  res12@cnFillOn = True
+  res12@cnLinesOn = False
+;  res12@cnLevels            := (/-1,0.01,0.1,1,2,3/)
+;  res12@cnFillColors        := (/"cyan","white","orange","orangered1","orangered2","orangered3","red"/)
+  res12@cnLevels        := (/-3,-2,-1,-0.1,-0.01,0.01, 0.1,1, 2, 3/)
+  res12@cnFillColors    := (/"mediumblue","mediumblue","dodgerblue","cadetblue1","lightcyan","white","sandybrown","coral1","brown3","brown","brown"/)
+;  res12@cnFillColors        := (/2,3,4,5,7,0,10,11,12,13/)
+  res12@lbLabelBarOn                = True
+  res12@lbAutoManage                 = False
+  res12@lbLabelFont                  = "helvetica-bold"
+  res12@lbLabelJust                  = "CenterRight"
+  res12@lbLabelFontHeightF           = 0.006
+;  res12@lbLabelStrings  :=(/-1,0.01,0.1,1,2,3/)
+;  res12@lbFillColors  := (/"cyan","white","orange","orangered1","orangered2","orangered3","red"/)
+
+
+;  res12@cnLevels            := (/ -3,-2,-1 ,-0.1,-0.01 ,0.01 ,0.1,1,2,3/)
+;  res12@cnFillColors        := (/2,3,4,5,7,0,10,11,12,13/)
+
+;  res12@cnLevels            := (/-2,-1,0.1,0.5,1,2/)
+;  res12@cnFillColors        := (/6,7,0,10,11,12,13/) ;(/3,4,6,7,0,10,11,12,13/)
+
+  plot     = kmacmaq2dcn_map(wks1,draw_value,res12)
+;;  dum4     = gsn_add_polyline(wks1,plot,air_seed_lon,air_seed_lat,polyres)   ; air seeding line
+;------------------
+; AWS acc process
+;------------------
+;   idx_24a             = ind(aws_time_to_UTC .ge. effect_start .and. aws_time_to_UTC .le. effect_end )
+;   data_time           = aws_time_to_UTC(idx_24a)
+;   data_rain2          = aws_rain(idx_24a)
+;   data_id2            = aws_id(idx_24a)
+;   data_lat2           = aws_lat(idx_24a)
+;   data_lon2           = aws_lon(idx_24a)
+
+;   idx_site            = ind(data_time .eq. effect_start)          ; sort site every 1 hour
+;   data_id             = data_id2(idx_site)
+;   data_lat            = data_lat2(idx_site)
+;   data_lon            = data_lon2(idx_site)
+
+;
+;   data_rain           = data_id
+;   data_rain           = 0.
+
+;   do m=0, dimsizes(idx_site)-1
+;      idx_m             = ind( data_id2 .eq. data_id(m) )
+;      data_rain(m)      = sum(data_rain2(idx_m))
+;   end do
+
+;   data_rain         = data_rain/10.
+
+
+ gsn_define_colormap(wks1,"MPL_gist_rainbow")
+
+; color_list     = new(dimsizes(data_id), "integer")
+
+; color_list     = where(                             data_rain .le.  0.1, 0, color_list)
+; color_list     = where(data_rain .gt. 0.1 .and.     data_rain .le.  0.2,28, color_list)
+; color_list     = where(data_rain .gt. 0.2 .and.     data_rain .le.  0.4,26, color_list)
+; color_list     = where(data_rain .gt. 0.4 .and.     data_rain .le.  0.6,24, color_list)
+; color_list     = where(data_rain .gt. 0.6 .and.     data_rain .le.  0.8,22, color_list)
+; color_list     = where(data_rain .gt. 0.8 .and.     data_rain .le.  1.0,20, color_list)
+; color_list     = where(data_rain .gt. 1.0 .and.     data_rain .le.  1.2,40, color_list)
+; color_list     = where(data_rain .gt. 1.2 .and.     data_rain .le.  1.4,45, color_list)
+; color_list     = where(data_rain .gt. 1.4 .and.     data_rain .le.  1.6,50, color_list)
+; color_list     = where(data_rain .gt. 1.6 .and.     data_rain .le.  1.8,55, color_list)
+; color_list     = where(data_rain .gt. 1.8 .and.     data_rain .le.  2.0,65, color_list)
+; color_list     = where(data_rain .gt. 2.0 .and.     data_rain .le.  2.2,70, color_list)
+; color_list     = where(data_rain .gt. 2.2 .and.     data_rain .le.  2.4,73, color_list)
+; color_list     = where(data_rain .gt. 2.4 .and.     data_rain .le.  2.6,76, color_list)
+; color_list     = where(data_rain .gt. 2.6 .and.     data_rain .le.  2.8,79, color_list)
+; color_list     = where(data_rain .gt. 2.8 .and.     data_rain .le.  3.0,82, color_list)
+; color_list     = where(data_rain .gt. 3.0 .and.     data_rain .le.  3.2,85, color_list)
+; color_list     = where(data_rain .gt. 3.2 .and.     data_rain .le.  3.4,88, color_list)
+; color_list     = where(data_rain .gt. 3.4 .and.     data_rain .le.  3.6,91, color_list)
+; color_list     = where(data_rain .gt. 3.6 .and.     data_rain .le.  3.8,94, color_list)
+; color_list     = where(data_rain .gt. 3.8 .and.     data_rain .le.  4.0,97, color_list)
+; color_list     = where(data_rain .gt. 4.0 .and.     data_rain .le.  4.2,105, color_list)
+; color_list     = where(data_rain .gt. 4.2 .and.     data_rain .le.  4.4,107, color_list)
+; color_list     = where(data_rain .gt. 4.4 .and.     data_rain .le.  4.6,109, color_list)
+; color_list     = where(data_rain .gt. 4.6 .and.     data_rain .le.  4.8,111, color_list)
+; color_list     = where(data_rain .gt. 4.8 .and.     data_rain .le.  5.0,112, color_list)
+; color_list     = where(                             data_rain .gt.  5.0, 2, color_list)
+
+; End AWS
+
+ polyres = True
+ polyres@gsMarkerIndex            = 16
+ polyres@gsMarkerSizeF            = 0.005
+ polyres@gsMarkerColor            = "white"
+
+ polyres1 = True
+ polyres1@gsMarkerIndex            = 4
+ polyres1@gsMarkerSizeF            = 0.005
+ polyres1@gsMarkerColor            = "black"
+
+  dummy8         = new ( dimsizes(idx_site), "graphic" )
+  dummy9         = new ( dimsizes(idx_site), "graphic" )
+
+;  dummy3         = new ( dimsizes(data_rain), "graphic" )
+;  dummy4         = new ( dimsizes(data_rain), "graphic" )
+
+do n2 = 0, dimsizes(idx_site) - 1
+    if ( .not. ismissing(color_list(n2)) ) then
+      polyres@gsMarkerColor          = color_list(n2)
+      dummy8(n2)     = gsn_add_polymarker(wks1, plot, data_lon(n2), data_lat(n2), polyres)
+      dummy9(n2)     = gsn_add_polymarker(wks1, plot, data_lon(n2), data_lat(n2), polyres1)
+    end if
+  end do
+
+;-------------------
+; add korea do line
+;-------------------
+  korea_lineYN = True
+  ad_line = korea_map_fn
+
+    if ( korea_lineYN ) then
+      lines = asciiread(ad_line, -1, "string")
+      delim = " "
+      respg            = True
+      respg@gsLineColor = "black"
+      respg@gsLineThicknessF = 2.
+
+      dum = new (1000,graphic)
+      j = 0
+      do i = 0, dimsizes(lines) - 1
+;     print((/lines(i)/))
+        num_l  = toint(str_get_field(lines(i),1,delim))
+        info   = toint(str_get_field(lines(i),2,delim))
+;   print((/info/))
+;       if ( info .eq. 2 .or. info .eq. 3 ) then
+        if ( info .eq. 0 .or. info .eq. 2 ) then
+          line_lon = tofloat(str_get_field(lines(i+1:i+num_l), 1, delim))
+          line_lat = tofloat(str_get_field(lines(i+1:i+num_l), 2, delim))
+          if ( info .eq. 0 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 0
+          end if
+          if ( info .eq. 2 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 0
+          end if
+          if ( info .eq. 3 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 1
+          end if
+          dum(j) = gsn_add_polyline (wks1, plot, line_lon, line_lat, respg)
+          j = j + 1
+          delete(line_lon)
+          delete(line_lat)
+        end if
+        i = i + num_l
+      end do
+    end if        ; korea_lineYN
+
+
+draw(plot)
+addtickmarkcmaq (wks1, plot)
+;addtimestampcmaq(wks, plot, initdate, validate)
+;addtitlecmaq    (wks, plot, "Enhanced Rain(18~21 hour)[mm]")
+;addlogo         (wks, plot, mother_model)
+
+frame(wks1)
+delete(plot)
+delete(wks1)
+
+
+
+;---------------------------------------------------------------------------
+; 6. acc. AWS and Model rain
+;---------------------------------------------------------------------------
+  wks = gsn_open_wks(wks_type, fout + "/" + mother_model + "_" + T_name + "_rain_acc" )
+  gsn_define_colormap(wks,"UKM_hadcrut")
+;----------------------
+; Enhaced rain by model
+;----------------------
+  draw_temp1           = (rain_expr(ne,:,:) - rain_expr(ns,:,:))
+  draw_temp2           = (rain_cntl(ne,:,:) - rain_cntl(ns,:,:))
+;;  draw_data2           = draw_temp1 - draw_temp2
+  draw_data2           = abs(draw_temp1 - draw_temp2)
+ 
+  draw_value           =  (/draw_data2/)
+;  print(max(draw_value(:,:)))
+;  print(min(draw_value(:,:)))
+;  print(sum(draw_value(:,:)))
+  a = sum(where(draw_value.gt.0.1.and.landmask.eq.1.0, draw_value, 0.0))
+  b = sum(where(draw_value.lt.-0.1.and.landmask.eq.1.0, draw_value, 0.0))
+;  print(a)
+;  print(b)
+;  print(a+b)
+  total = (draw_value(:,:).ge.0.1 .and. landmask.eq.1.0)
+;  print(num(total))
+
+
+;------------------------
+; Enhanced rain target site
+;------------------------
+
+  target1_lat = 38.26414000    ; jinburoung
+  target1_lon = 128.37415000 
+  target2_lat = 38.07699000    ; oseak
+  target2_lon = 128.49325000    
+  target3_lat = 37.72484000    ; seongsan 
+  target3_lon = 128.77862000
+  loc1 = wrf_user_ll_to_ij(f, target1_lon, target1_lat, True)
+  loc2 = wrf_user_ll_to_ij(f, target2_lon, target2_lat, True)
+  loc3 = wrf_user_ll_to_ij(f, target3_lon, target3_lat, True)
+  x1 = loc1(0) - 1    ; NCL 0-based indexing
+  y1 = loc1(1) - 1
+  x2 = loc2(0) - 1    ; NCL 0-based indexing
+  y2 = loc2(1) - 1
+  x3 = loc3(0) - 1    ; NCL 0-based indexing
+  y3 = loc3(1) - 1
+;  print(draw_value(y1,x1))
+;  print(draw_value(y2,x2))
+;  print(draw_value(y3,x3))
+
+
+  res12 = True
+  res12 = res1
+  res12@cnLevelSelectionMode       = "ExplicitLevels"
+  res12@gsnLeftString    = ""
+  res12@gsnRightString   = ""
+
+;;  res12@cnLevels            := (/-1,0.1,0.5,1,2,3/)
+;;  res12@cnFillColors        := (/"cyan","white","orange","orangered1","orangered2","orangered3","red"/)
+;  res12@cnLevels            :=  (/-3,-2,-1,-0.1,-0.01,0.01,0.1,1,2,3/)
+;  res12@cnFillColors        :=  (/2,3,4,5,7,0,10,11,12,13/)
+
+;;  res12@cnLevels        := (/-3,-2,-1,-0.1,-0.01,0.01, 0.1,1, 2, 3/)
+;; res12@cnFillColors    := (/"mediumblue","mediumblue","dodgerblue","cadetblue1","lightcyan","white","sandybrown","coral1","brown3","brown","brown"/)
+
+;;  res12@cnLevels        := (/1.0, 5, 10, 20, 30, 40/)
+;; res12@cnLevels        := (/1.0,2.5, 5, 10, 20,30/)
+;; res12@cnLevels        := (/0.25,1.0, 2.5,5, 10,20/)
+;; res12@cnLevels        := (/0.01,0.1, 0.5,1, 2,3/)
+;; res12@cnLevels        := (/1, 2.5, 5, 10, 15, 20/)
+;; res12@cnLevels        := (/0.1,2, 4,6, 8,10/)
+;;  res12@cnLevels        := (/0.1, 1, 2, 3, 4, 5/)
+  res12@cnLevels        := (/1, 5, 10, 20, 30, 40/)
+  res12@cnFillColors    := (/"white","mistyrose","lightsalmon","brown1","red3","brown","brown"/)
+
+  plot     = kmacmaq2dcn_map(wks,draw_value,res12)
+  dum4     = gsn_add_polyline(wks,plot,air_seed_lon,air_seed_lat,polyres)   ; air seeding line
+
+;---------------------------
+; Seeding material diffusion
+;---------------------------
+  draw_data3           =  dim_sum_n(cacl2(ns:ne,:,:,:),0)       ;
+  draw_data4           =  draw_data3 * depth      ;
+  draw_value           = (/dim_sum_n(draw_data4, 0)/)                  ; total cacl2  /m2
+
+ ; seeding material contour
+  res2                  = True
+  res2@gsnFrame         = False
+  res2@gsnDraw          = False
+  res2@tfDoNDCOverlay   = True
+  res2@tmXTOn           = False
+  res2@tmXBOn           = False
+  res2@tmYLOn           = False
+  res2@tmYROn           = False
+  res2@gsnLeftString    = ""
+  res2@gsnRightString   = ""
+  res2@cnLinesOn        = True
+  res2@cnFillOn         = False
+
+  res2@cnMonoLineColor  = False
+  res2@cnLineDashPattern= 1
+  res2@cnLineColors     = span_color_rgba("seaice_2",8)
+  res2@cnLineLabelsOn   = False
+  res2@cnLineThicknessF = 4.0
+  res2@cnInfoLabelOn    = False
+
+  ;ress@cnLineThicknessF = 5.0 ; make lines thicker
+  res2@gsnSpreadColors  = False
+  res2@cnLevelSelectionMode  = "ExplicitLevels"
+  res2@cnLevels = (/1,100,10000,1E+6,1E+8,1E+10/)
+
+;  plot2     = kmacmaq2dcn_map(wks,draw_value,res2)
+  plot2     = gsn_csm_contour(wks,draw_value,res2)
+  overlay(plot,plot2)
+
+;------------------
+; AWS acc process
+;------------------
+   idx_24a             = ind(aws_time_to_UTC .ge. effect_start .and. aws_time_to_UTC .le. effect_end )
+   data_time           = aws_time_to_UTC(idx_24a)
+   data_rain2          = aws_rain(idx_24a)
+   data_id2            = aws_id(idx_24a)
+   data_lat2           = aws_lat(idx_24a)
+   data_lon2           = aws_lon(idx_24a)
+
+   idx_site            = ind(data_time .eq. effect_start)          ; sort site every 1 hour
+   data_id             = data_id2(idx_site)
+   data_lat            = data_lat2(idx_site)
+   data_lon            = data_lon2(idx_site)
+
+   data_rain           = data_id
+   data_rain           = 0.
+
+   do m=0, dimsizes(idx_site)-1
+     idx_m             = ind( data_id2 .eq. data_id(m) )
+     data_rain(m)      = sum(data_rain2(idx_m))
+   end do
+
+     data_rain         = data_rain/10.
+;print(data_rain)
+
+  gsn_define_colormap(wks,"MPL_gist_rainbow")
+
+  color_list2     = new(dimsizes(data_id), "integer")
+
+  color_list2     = where(                             data_rain .le.  0.1, 0, color_list2)
+  color_list2     = where(data_rain .gt. 0.1 .and.     data_rain .le.  0.2,28, color_list2)
+  color_list2     = where(data_rain .gt. 0.2 .and.     data_rain .le.  0.4,26, color_list2)
+  color_list2     = where(data_rain .gt. 0.4 .and.     data_rain .le.  0.6,24, color_list2)
+  color_list2     = where(data_rain .gt. 0.6 .and.     data_rain .le.  0.8,22, color_list2)
+  color_list2     = where(data_rain .gt. 0.8 .and.     data_rain .le.  1.0,20, color_list2)
+  color_list2     = where(data_rain .gt. 1.0 .and.     data_rain .le.  1.2,40, color_list2)
+  color_list2     = where(data_rain .gt. 1.2 .and.     data_rain .le.  1.4,45, color_list2)
+  color_list2     = where(data_rain .gt. 1.4 .and.     data_rain .le.  1.6,50, color_list2)
+  color_list2     = where(data_rain .gt. 1.6 .and.     data_rain .le.  1.8,55, color_list2)
+  color_list2     = where(data_rain .gt. 1.8 .and.     data_rain .le.  2.0,65, color_list2)
+  color_list2     = where(data_rain .gt. 2.0 .and.     data_rain .le.  2.2,70, color_list2)
+  color_list2     = where(data_rain .gt. 2.2 .and.     data_rain .le.  2.4,73, color_list2)
+  color_list2     = where(data_rain .gt. 2.4 .and.     data_rain .le.  2.6,76, color_list2)
+  color_list2     = where(data_rain .gt. 2.6 .and.     data_rain .le.  2.8,79, color_list2)
+  color_list2     = where(data_rain .gt. 2.8 .and.     data_rain .le.  3.0,82, color_list2)
+  color_list2     = where(data_rain .gt. 3.0 .and.     data_rain .le.  3.2,85, color_list2)
+  color_list2     = where(data_rain .gt. 3.2 .and.     data_rain .le.  3.4,88, color_list2)
+  color_list2     = where(data_rain .gt. 3.4 .and.     data_rain .le.  3.6,91, color_list2)
+  color_list2     = where(data_rain .gt. 3.6 .and.     data_rain .le.  3.8,94, color_list2)
+  color_list2     = where(data_rain .gt. 3.8 .and.     data_rain .le.  4.0,97, color_list2)
+  color_list2     = where(data_rain .gt. 4.0 .and.     data_rain .le.  4.2,105,color_list2)
+  color_list2     = where(data_rain .gt. 4.2 .and.     data_rain .le.  4.4,107,color_list2)
+  color_list2     = where(data_rain .gt. 4.4 .and.     data_rain .le.  4.6,109,color_list2)
+  color_list2     = where(data_rain .gt. 4.6 .and.     data_rain .le.  4.8,111,color_list2)
+  color_list2     = where(data_rain .gt. 4.8 .and.     data_rain .le.  5.0,112,color_list2)
+  color_list2     = where(                             data_rain .gt.  5.0, 2, color_list2)
+
+  polyres = True
+  polyres@gsMarkerIndex            = 16
+  polyres@gsMarkerSizeF            = 0.005
+  polyres@gsMarkerColor            = "white"
+
+  polyres1 = True
+  polyres1@gsMarkerIndex            = 4
+  polyres1@gsMarkerSizeF            = 0.005
+  polyres1@gsMarkerColor            = "black"
+
+;print(color_list2)
+; End AWS
+
+  dummy3         = new ( dimsizes(idx_site), "graphic" )
+  dummy4         = new ( dimsizes(idx_site), "graphic" )
+
+  do n2 = 0, dimsizes(idx_site) - 1
+    if ( .not. ismissing(color_list2(n2)) .and. color_list2(n2) .ne. 0 ) then
+      polyres@gsMarkerColor          = color_list2(n2)
+      dummy3(n2)     = gsn_add_polymarker(wks, plot, data_lon(n2), data_lat(n2), polyres)
+      dummy4(n2)     = gsn_add_polymarker(wks, plot, data_lon(n2), data_lat(n2), polyres1)
+    end if
+  end do
+
+;-------------------
+; add korea do line
+;-------------------
+  korea_lineYN = True
+  ad_line = korea_map_fn
+
+    if ( korea_lineYN ) then
+      lines = asciiread(ad_line, -1, "string")
+      delim = " "
+      respg            = True
+      respg@gsLineColor = "black"
+      respg@gsLineThicknessF = 2.
+
+      dum = new (1000,graphic)
+      j = 0
+      do i = 0, dimsizes(lines) - 1
+;     print((/lines(i)/))
+        num_l  = toint(str_get_field(lines(i),1,delim))
+        info   = toint(str_get_field(lines(i),2,delim))
+;   print((/info/))
+;       if ( info .eq. 2 .or. info .eq. 3 ) then
+        if ( info .eq. 0 .or. info .eq. 2 ) then
+          line_lon = tofloat(str_get_field(lines(i+1:i+num_l), 1, delim))
+          line_lat = tofloat(str_get_field(lines(i+1:i+num_l), 2, delim))
+          if ( info .eq. 0 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 0
+          end if
+          if ( info .eq. 2 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 0
+          end if
+          if ( info .eq. 3 ) then
+            respg@gsLineThicknessF = 2.
+            respg@gsLineDashPattern = 1
+          end if
+          dum(j) = gsn_add_polyline (wks, plot, line_lon, line_lat, respg)
+          j = j + 1
+          delete(line_lon)
+          delete(line_lat)
+        end if
+        i = i + num_l
+      end do
+    end if
+
+
+draw(plot)
+addtickmarkcmaq (wks, plot)
+;addtimestampcmaq(wks, plot, initdate, validate)
+;addtitlecmaq    (wks, plot, "Enhanced Rain(18~21 hour)[mm]")
+;addlogo         (wks, plot, mother_model)
+
+frame(wks)
+delete(plot)
+delete(wks)
+
+
+
+end
