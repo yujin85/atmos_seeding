@@ -72,9 +72,17 @@ SUBDOMAIN_NY = 100
 SUBDOMAIN_NX = 100
 
 # 동일 디렉터리 안에서 NOSEED/SEED 파일을 파일명으로 구분한다.
+# 사례 설정은 wrf_dir(동일 디렉터리) 또는 noseed_dir/seed_dir(분리 디렉터리)을 지원한다.
 NOSEED_FILE_PATTERN = "wrfout_*_NOSEED.nc"
 SEED_FILE_PATTERN = "wrfout_*_SEED.nc"
 WRF_RECURSIVE = False
+
+# 쉘 파일에서 사례를 자동 생성할 때 사용하는 선택 설정
+SHELL_DIR = Path("./case_shells")
+SHELL_GLOB = "*.sh"
+WRF_ROOT = Path(".")
+NOSEED_RELATIVE_DIR = ""
+SEED_RELATIVE_DIR = ""
 
 # 효과시간 경계 시각 허용오차
 WRF_TIME_TOLERANCE_MINUTES = 0
@@ -155,7 +163,6 @@ def ensure_directory(path: Path) -> None:
 def validate_case(case: dict) -> None:
     required = {
         "case_name",
-        "wrf_dir",
         "wrf_time_basis",
         "seeding_start_kst",
         "seeding_end_kst",
@@ -165,6 +172,11 @@ def validate_case(case: dict) -> None:
     missing = required.difference(case)
     if missing:
         raise KeyError(f"사례 설정 누락: {sorted(missing)}")
+
+    has_shared_dir = bool(case.get("wrf_dir"))
+    has_split_dirs = bool(case.get("noseed_dir")) and bool(case.get("seed_dir"))
+    if not (has_shared_dir or has_split_dirs):
+        raise KeyError("사례 설정에는 wrf_dir 또는 noseed_dir/seed_dir가 필요합니다.")
 
     seed_start = parse_datetime(case["seeding_start_kst"])
     seed_end = parse_datetime(case["seeding_end_kst"])
@@ -851,14 +863,16 @@ def process_case(case: dict, asos_df: pd.DataFrame) -> dict:
     effect_start = parse_datetime(case["effect_start_kst"])
     effect_end = parse_datetime(case["effect_end_kst"])
 
-    wrf_dir = Path(case["wrf_dir"])
+    wrf_dir = Path(case["wrf_dir"]) if case.get("wrf_dir") else None
+    noseed_dir = Path(case.get("noseed_dir") or wrf_dir)
+    seed_dir = Path(case.get("seed_dir") or wrf_dir)
     time_basis = case["wrf_time_basis"]
 
     noseed_file = find_single_wrf_file(
-        wrf_dir, NOSEED_FILE_PATTERN, "NOSEED"
+        noseed_dir, NOSEED_FILE_PATTERN, "NOSEED"
     )
     seed_file = find_single_wrf_file(
-        wrf_dir, SEED_FILE_PATTERN, "SEED"
+        seed_dir, SEED_FILE_PATTERN, "SEED"
     )
 
     print("\n" + "=" * 90)
@@ -867,7 +881,11 @@ def process_case(case: dict, asos_df: pd.DataFrame) -> dict:
     print(f"Seeding KST : {seeding_start} ~ {seeding_end}")
     print(f"Effect  KST : {effect_start} ~ {effect_end}")
 
-    print(f"WRF directory: {wrf_dir}")
+    if wrf_dir is not None:
+        print(f"WRF directory: {wrf_dir}")
+    else:
+        print(f"NOSEED directory: {noseed_dir}")
+        print(f"SEED directory  : {seed_dir}")
     print(f"NOSEED file : {noseed_file.name}")
     print(f"SEED file   : {seed_file.name}")
 
@@ -971,7 +989,9 @@ def process_case(case: dict, asos_df: pd.DataFrame) -> dict:
         "time_dir": case.get("time_dir", ""),
         "model_start_utc": case.get("model_start_utc", ""),
         "model_start_kst": case.get("model_start_kst", ""),
-        "wrf_dir": str(wrf_dir),
+        "wrf_dir": str(wrf_dir) if wrf_dir is not None else "",
+        "noseed_dir": str(noseed_dir),
+        "seed_dir": str(seed_dir),
         "noseed_file": str(noseed_file),
         "seed_file": str(seed_file),
         "effect_start_utc": case.get("effect_start_utc", ""),
@@ -1096,7 +1116,7 @@ def main() -> int:
     for case in CASES:
         print(
             f"  {case['case_name']}: "
-            f"WRF={case['wrf_dir']}, "
+            f"WRF={case.get('wrf_dir') or case.get('noseed_dir', '') + ' / ' + case.get('seed_dir', '')}, "
             f"effect KST={case['effect_start_kst']}~{case['effect_end_kst']}"
         )
 
