@@ -80,6 +80,8 @@ SEED_FILE_PATTERN = "wrfout_*_SEED.nc"
 WRF_RECURSIVE = False
 
 # 쉘 파일에서 사례를 자동 생성할 때 사용하는 선택 설정
+# True로 바꾸면 아래 CASES 목록 대신 SHELL_DIR/SHELL_GLOB에서 사례를 읽는다.
+USE_SHELL_CASE_DISCOVERY = False
 SHELL_DIR = Path("./case_shells")
 SHELL_GLOB = "*.sh"
 WRF_ROOT = Path(".")
@@ -291,6 +293,20 @@ def discover_cases_from_shells() -> List[dict]:
     if not shell_files:
         raise FileNotFoundError(f"쉘 파일을 찾지 못했습니다: {SHELL_DIR}/{SHELL_GLOB}")
     return [make_case_from_shell(path) for path in shell_files]
+
+
+def get_configured_cases() -> List[dict]:
+    """설정 방식에 따라 수동 CASES 또는 쉘 자동 생성 사례 목록을 반환한다."""
+    if USE_SHELL_CASE_DISCOVERY:
+        return discover_cases_from_shells()
+    return list(CASES)
+
+
+def describe_case_wrf_dirs(case: dict) -> str:
+    """시작 로그에 표시할 WRF 디렉터리 설정을 문자열로 만든다."""
+    if case.get("wrf_dir"):
+        return str(case["wrf_dir"])
+    return f"{case.get('noseed_dir', '')} / {case.get('seed_dir', '')}"
 
 
 # =============================================================================
@@ -1273,11 +1289,19 @@ def process_case(case: dict, asos_df: pd.DataFrame) -> dict:
 def main() -> int:
     ensure_directory(OUTPUT_ROOT)
 
-    print(f"설정된 사례 수: {len(CASES)}")
-    for case in CASES:
+    try:
+        cases = get_configured_cases()
+    except Exception as exc:
+        print(f"[ERROR] 사례 설정 생성 실패: {exc}", file=sys.stderr)
+        return 1
+
+    case_source = "쉘 자동 생성" if USE_SHELL_CASE_DISCOVERY else "수동 CASES"
+    print(f"사례 설정 방식: {case_source}")
+    print(f"설정된 사례 수: {len(cases)}")
+    for case in cases:
         print(
             f"  {case['case_name']}: "
-            f"WRF={case.get('wrf_dir') or case.get('noseed_dir', '') + ' / ' + case.get('seed_dir', '')}, "
+            f"WRF={describe_case_wrf_dirs(case)}, "
             f"effect KST={case['effect_start_kst']}~{case['effect_end_kst']}"
         )
 
@@ -1291,7 +1315,7 @@ def main() -> int:
     all_summaries = []
     failed_cases = []
 
-    for case in CASES:
+    for case in cases:
         try:
             summary = process_case(case, asos_df)
             all_summaries.append(summary)
