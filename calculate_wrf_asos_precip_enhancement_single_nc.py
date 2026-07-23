@@ -737,6 +737,25 @@ def calculate_asos_period_precipitation(
     return total, period, method_summary
 
 
+def validate_asos_period_matches_wrf(
+    asos_period: pd.DataFrame,
+    wrf_start_kst: datetime,
+    wrf_end_kst: datetime,
+) -> None:
+    """ASOS 누적강수 계산 경계가 WRF 기간강수 경계와 같은지 확인한다."""
+    if asos_period.empty:
+        raise ValueError("ASOS 효과시간 기간 자료가 비어 있습니다.")
+
+    asos_start_kst = asos_period.iloc[0]["TM"]
+    asos_end_kst = asos_period.iloc[-1]["TM"]
+    if asos_start_kst != wrf_start_kst or asos_end_kst != wrf_end_kst:
+        raise ValueError(
+            "ASOS와 WRF 기간강수 경계시각이 다릅니다: "
+            f"WRF=({wrf_start_kst}~{wrf_end_kst}), "
+            f"ASOS=({asos_start_kst}~{asos_end_kst})"
+        )
+
+
 # =============================================================================
 # 통계·저장·그림
 # =============================================================================
@@ -958,6 +977,7 @@ def process_case(case: dict, asos_df: pd.DataFrame) -> dict:
     asos_precip, asos_period, asos_method = calculate_asos_period_precipitation(
         asos_df, actual_effect_start, actual_effect_end, ASOS_TIME_TOLERANCE_MINUTES
     )
+    validate_asos_period_matches_wrf(asos_period, actual_effect_start, actual_effect_end)
 
     if np.isfinite(enhancement_rate_100x100):
         asos_estimated_enhancement = asos_precip * enhancement_rate_100x100 / 100.0
@@ -996,6 +1016,9 @@ def process_case(case: dict, asos_df: pd.DataFrame) -> dict:
         "requested_effect_end_kst": effect_end,
         "actual_effect_start_kst": actual_effect_start,
         "actual_effect_end_kst": actual_effect_end,
+        "precipitation_interval_convention": "(actual_effect_start_kst, actual_effect_end_kst]",
+        "asos_period_start_kst": asos_period.iloc[0]["TM"],
+        "asos_period_end_kst": asos_period.iloc[-1]["TM"],
         "wrf_time_count": len(seed_records),
         "analysis_area_km2": analysis_area_km2,
         "seed_mean_100x100_mm": seed_mean,
