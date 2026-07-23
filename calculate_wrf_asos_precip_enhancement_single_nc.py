@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import csv
 import math
+import os
 import re
 import sys
 import warnings
@@ -43,6 +44,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import BoundaryNorm, ListedColormap
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -72,9 +74,19 @@ SUBDOMAIN_NY = 100
 SUBDOMAIN_NX = 100
 
 # 동일 디렉터리 안에서 NOSEED/SEED 파일을 파일명으로 구분한다.
+# 사례 설정은 wrf_dir(동일 디렉터리) 또는 noseed_dir/seed_dir(분리 디렉터리)을 지원한다.
 NOSEED_FILE_PATTERN = "wrfout_*_NOSEED.nc"
 SEED_FILE_PATTERN = "wrfout_*_SEED.nc"
 WRF_RECURSIVE = False
+
+# 쉘 파일에서 사례를 자동 생성할 때 사용하는 선택 설정
+# True로 바꾸면 아래 CASES 목록 대신 SHELL_DIR/SHELL_GLOB에서 사례를 읽는다.
+USE_SHELL_CASE_DISCOVERY = False
+SHELL_DIR = Path("./case_shells")
+SHELL_GLOB = "*.sh"
+WRF_ROOT = Path(".")
+NOSEED_RELATIVE_DIR = ""
+SEED_RELATIVE_DIR = ""
 
 # 효과시간 경계 시각 허용오차
 WRF_TIME_TOLERANCE_MINUTES = 0
@@ -84,6 +96,35 @@ ASOS_TIME_TOLERANCE_MINUTES = 0
 ENHANCEMENT_THRESHOLD_MM = 0.01
 MIN_SEED_MEAN_FOR_RATE_MM = 1.0e-12
 SAVE_FIGURES = True
+
+# -----------------------------------------------------------------------------
+# NCL 유사 그림 설정
+# -----------------------------------------------------------------------------
+# SEED/NOSEED에는 반드시 같은 등치선 구간을 적용해 직접 비교한다.
+PRECIP_LEVELS_MM = np.array(
+    [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 100],
+    dtype=float,
+)
+PRECIP_COLORMAP = "turbo"
+
+# draw_anal_SUNNY.ncl의 누적 증우량 등치선 구간과 색상 구조를 반영한다.
+ENHANCEMENT_LEVELS_MM = np.array(
+    [-3, -2, -1, -0.1, -0.01, 0.01, 0.1, 1, 2, 3],
+    dtype=float,
+)
+ENHANCEMENT_COLORS = [
+    "mediumblue", "mediumblue", "dodgerblue", "cadetblue",
+    "lightcyan", "white", "sandybrown", "coral",
+    "brown", "darkred", "maroon",
+]
+
+# NCL에서 KOREA_MAP 환경변수로 읽던 행정경계 파일.
+# 환경변수가 없으면 경계선을 생략하고 WRF 격자만 그린다.
+KOREA_MAP_FILE = (
+    Path(os.environ["KOREA_MAP"]) if os.environ.get("KOREA_MAP") else None
+)
+MAP_LINEWIDTH = 0.8
+FIGURE_DPI = 250
 
 # 사례별 설정
 # - WRF 파일 내부 Times: UTC
@@ -155,7 +196,6 @@ def ensure_directory(path: Path) -> None:
 def validate_case(case: dict) -> None:
     required = {
         "case_name",
-        "wrf_dir",
         "wrf_time_basis",
         "seeding_start_kst",
         "seeding_end_kst",
@@ -165,6 +205,11 @@ def validate_case(case: dict) -> None:
     missing = required.difference(case)
     if missing:
         raise KeyError(f"사례 설정 누락: {sorted(missing)}")
+
+    has_shared_dir = bool(case.get("wrf_dir"))
+    has_split_dirs = bool(case.get("noseed_dir")) and bool(case.get("seed_dir"))
+    if not (has_shared_dir or has_split_dirs):
+        raise KeyError("사례 설정에는 wrf_dir 또는 noseed_dir/seed_dir가 필요합니다.")
 
     seed_start = parse_datetime(case["seeding_start_kst"])
     seed_end = parse_datetime(case["seeding_end_kst"])
@@ -248,6 +293,20 @@ def discover_cases_from_shells() -> List[dict]:
     if not shell_files:
         raise FileNotFoundError(f"쉘 파일을 찾지 못했습니다: {SHELL_DIR}/{SHELL_GLOB}")
     return [make_case_from_shell(path) for path in shell_files]
+
+
+def get_configured_cases() -> List[dict]:
+    """설정 방식에 따라 수동 CASES 또는 쉘 자동 생성 사례 목록을 반환한다."""
+    if USE_SHELL_CASE_DISCOVERY:
+        return discover_cases_from_shells()
+    return list(CASES)
+
+
+def describe_case_wrf_dirs(case: dict) -> str:
+    """시작 로그에 표시할 WRF 디렉터리 설정을 문자열로 만든다."""
+    if case.get("wrf_dir"):
+        return str(case["wrf_dir"])
+    return f"{case.get('noseed_dir', '')} / {case.get('seed_dir', '')}"
 
 
 # =============================================================================
@@ -749,6 +808,62 @@ def safe_nanmax(array: np.ndarray) -> float:
     return float(np.nanmax(array)) if np.isfinite(array).any() else float("nan")
 
 
+def read_korea_map_segments(path: Optional[Path]) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """
+    NCL KOREA_MAP 형식의 경계선 파일을 읽는다.
+
+    각 블록의 첫 줄은 "점개수 경계종류", 이후 점개수만큼 "경도 위도"가
+    이어지는 형식을 가정한다. NCL 코드와 동일하게 경계종류 0 또는 2만 그린다.
+    """
+    if path is None or not path.exists():
+        return []
+
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    segments: List[Tuple[np.ndarray, np.ndarray]] = []
+    i = 0
+    while i < len(lines):
+        tokens = lines[i].split()
+        if len(tokens) < 2:
+            i += 1
+            continue
+        try:
+            npoint = int(tokens[0])
+            info = int(tokens[1])
+        except ValueError:
+            i += 1
+            continue
+
+        coords = []
+        for row in lines[i + 1:i + 1 + npoint]:
+            values = row.split()
+            if len(values) < 2:
+                continue
+            try:
+                coords.append((float(values[0]), float(values[1])))
+            except ValueError:
+                continue
+
+        if info in {0, 2} and len(coords) >= 2:
+            arr = np.asarray(coords, dtype=float)
+            segments.append((arr[:, 0], arr[:, 1]))
+        i += npoint + 1
+
+    return segments
+
+
+def add_map_lines(
+    ax: plt.Axes,
+    segments: Sequence[Tuple[np.ndarray, np.ndarray]],
+) -> None:
+    """분석영역 안에 포함되는 해안선·행정경계선을 추가한다."""
+    for line_lon, line_lat in segments:
+        ax.plot(
+            line_lon, line_lat,
+            color="black", linewidth=MAP_LINEWIDTH,
+            solid_capstyle="round", zorder=5,
+        )
+
+
 def save_maps(
     output_dir: Path,
     lon: np.ndarray,
@@ -760,27 +875,101 @@ def save_maps(
     center_lat: float,
     case_name: str,
 ) -> None:
-    figures = [
-        (noseed, "NOSEED accumulated precipitation", "mm", "noseed_precip.png", None),
-        (seed, "SEED accumulated precipitation", "mm", "seed_precip.png", None),
-        (enhancement, "Precipitation enhancement (SEED - NOSEED)", "mm", "enhancement.png", "RdBu_r"),
+    """
+    NCL 그림과 유사하게 이산 등치선, 공통 강수 색상범위, 행정경계선 및
+    대관령 표식을 적용하여 SEED/NOSEED/증우량 지도를 저장한다.
+    """
+    map_segments = read_korea_map_segments(KOREA_MAP_FILE)
+
+    precip_cmap = plt.get_cmap(PRECIP_COLORMAP, len(PRECIP_LEVELS_MM) - 1)
+    precip_norm = BoundaryNorm(PRECIP_LEVELS_MM, precip_cmap.N, clip=False)
+
+    enhancement_cmap = ListedColormap(ENHANCEMENT_COLORS)
+    enhancement_norm = BoundaryNorm(
+        ENHANCEMENT_LEVELS_MM, enhancement_cmap.N, clip=False
+    )
+
+    plot_specs = [
+        {
+            "values": noseed,
+            "title": "NOSEED accumulated precipitation",
+            "filename": "noseed_precip_ncl_style.png",
+            "levels": PRECIP_LEVELS_MM,
+            "cmap": precip_cmap,
+            "norm": precip_norm,
+            "extend": "max",
+        },
+        {
+            "values": seed,
+            "title": "SEED accumulated precipitation",
+            "filename": "seed_precip_ncl_style.png",
+            "levels": PRECIP_LEVELS_MM,
+            "cmap": precip_cmap,
+            "norm": precip_norm,
+            "extend": "max",
+        },
+        {
+            "values": enhancement,
+            "title": "Precipitation enhancement (SEED - NOSEED)",
+            "filename": "enhancement_ncl_style.png",
+            "levels": ENHANCEMENT_LEVELS_MM,
+            "cmap": enhancement_cmap,
+            "norm": enhancement_norm,
+            "extend": "both",
+        },
     ]
 
-    for values, title, units, filename, cmap in figures:
-        fig, ax = plt.subplots(figsize=(9, 8))
-        kwargs = {"shading": "auto"}
-        if cmap is not None:
-            kwargs["cmap"] = cmap
-        mesh = ax.pcolormesh(lon, lat, values, **kwargs)
-        ax.scatter([center_lon], [center_lat], marker="*", s=100, label=ASOS_STATION_NAME)
-        ax.set_xlabel("Longitude")
-        ax.set_ylabel("Latitude")
-        ax.set_title(f"{case_name}: {title}")
-        ax.legend(loc="best")
-        cbar = fig.colorbar(mesh, ax=ax)
-        cbar.set_label(units)
+    lon_min, lon_max = float(np.nanmin(lon)), float(np.nanmax(lon))
+    lat_min, lat_max = float(np.nanmin(lat)), float(np.nanmax(lat))
+
+    for spec in plot_specs:
+        fig, ax = plt.subplots(figsize=(10, 8.5))
+
+        contour = ax.contourf(
+            lon, lat, spec["values"],
+            levels=spec["levels"],
+            cmap=spec["cmap"],
+            norm=spec["norm"],
+            extend=spec["extend"],
+            antialiased=False,
+            zorder=1,
+        )
+
+        add_map_lines(ax, map_segments)
+
+        ax.scatter(
+            ASOS_LON, ASOS_LAT, marker="*", s=145,
+            facecolor="red", edgecolor="black", linewidth=0.7,
+            label=f"{ASOS_STATION_NAME} ASOS ({ASOS_STATION_ID})", zorder=8,
+        )
+        ax.scatter(
+            center_lon, center_lat, marker="o", s=38,
+            facecolor="none", edgecolor="black", linewidth=1.0,
+            label="Nearest WRF grid", zorder=8,
+        )
+
+        ax.set_xlim(lon_min, lon_max)
+        ax.set_ylim(lat_min, lat_max)
+        ax.set_aspect(1.0 / math.cos(math.radians((lat_min + lat_max) / 2.0)))
+        ax.set_xlabel("Longitude (°E)")
+        ax.set_ylabel("Latitude (°N)")
+        ax.set_title(f"{case_name}: {spec['title']}", fontsize=14, pad=10)
+        ax.tick_params(direction="out", top=False, right=False)
+        ax.grid(False)
+        ax.legend(loc="upper right", frameon=True, fontsize=9)
+
+        cbar = fig.colorbar(
+            contour, ax=ax, orientation="vertical",
+            pad=0.025, fraction=0.048, ticks=spec["levels"],
+        )
+        cbar.set_label("mm")
+        cbar.ax.tick_params(labelsize=9)
+
         fig.tight_layout()
-        fig.savefig(output_dir / filename, dpi=200, bbox_inches="tight")
+        fig.savefig(
+            output_dir / spec["filename"],
+            dpi=FIGURE_DPI, bbox_inches="tight", facecolor="white",
+        )
         plt.close(fig)
 
 
@@ -851,14 +1040,16 @@ def process_case(case: dict, asos_df: pd.DataFrame) -> dict:
     effect_start = parse_datetime(case["effect_start_kst"])
     effect_end = parse_datetime(case["effect_end_kst"])
 
-    wrf_dir = Path(case["wrf_dir"])
+    wrf_dir = Path(case["wrf_dir"]) if case.get("wrf_dir") else None
+    noseed_dir = Path(case.get("noseed_dir") or wrf_dir)
+    seed_dir = Path(case.get("seed_dir") or wrf_dir)
     time_basis = case["wrf_time_basis"]
 
     noseed_file = find_single_wrf_file(
-        wrf_dir, NOSEED_FILE_PATTERN, "NOSEED"
+        noseed_dir, NOSEED_FILE_PATTERN, "NOSEED"
     )
     seed_file = find_single_wrf_file(
-        wrf_dir, SEED_FILE_PATTERN, "SEED"
+        seed_dir, SEED_FILE_PATTERN, "SEED"
     )
 
     print("\n" + "=" * 90)
@@ -867,7 +1058,11 @@ def process_case(case: dict, asos_df: pd.DataFrame) -> dict:
     print(f"Seeding KST : {seeding_start} ~ {seeding_end}")
     print(f"Effect  KST : {effect_start} ~ {effect_end}")
 
-    print(f"WRF directory: {wrf_dir}")
+    if wrf_dir is not None:
+        print(f"WRF directory: {wrf_dir}")
+    else:
+        print(f"NOSEED directory: {noseed_dir}")
+        print(f"SEED directory  : {seed_dir}")
     print(f"NOSEED file : {noseed_file.name}")
     print(f"SEED file   : {seed_file.name}")
 
@@ -971,7 +1166,9 @@ def process_case(case: dict, asos_df: pd.DataFrame) -> dict:
         "time_dir": case.get("time_dir", ""),
         "model_start_utc": case.get("model_start_utc", ""),
         "model_start_kst": case.get("model_start_kst", ""),
-        "wrf_dir": str(wrf_dir),
+        "wrf_dir": str(wrf_dir) if wrf_dir is not None else "",
+        "noseed_dir": str(noseed_dir),
+        "seed_dir": str(seed_dir),
         "noseed_file": str(noseed_file),
         "seed_file": str(seed_file),
         "effect_start_utc": case.get("effect_start_utc", ""),
@@ -1092,11 +1289,19 @@ def process_case(case: dict, asos_df: pd.DataFrame) -> dict:
 def main() -> int:
     ensure_directory(OUTPUT_ROOT)
 
-    print(f"설정된 사례 수: {len(CASES)}")
-    for case in CASES:
+    try:
+        cases = get_configured_cases()
+    except Exception as exc:
+        print(f"[ERROR] 사례 설정 생성 실패: {exc}", file=sys.stderr)
+        return 1
+
+    case_source = "쉘 자동 생성" if USE_SHELL_CASE_DISCOVERY else "수동 CASES"
+    print(f"사례 설정 방식: {case_source}")
+    print(f"설정된 사례 수: {len(cases)}")
+    for case in cases:
         print(
             f"  {case['case_name']}: "
-            f"WRF={case['wrf_dir']}, "
+            f"WRF={describe_case_wrf_dirs(case)}, "
             f"effect KST={case['effect_start_kst']}~{case['effect_end_kst']}"
         )
 
@@ -1110,7 +1315,7 @@ def main() -> int:
     all_summaries = []
     failed_cases = []
 
-    for case in CASES:
+    for case in cases:
         try:
             summary = process_case(case, asos_df)
             all_summaries.append(summary)
